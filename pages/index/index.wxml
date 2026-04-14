@@ -1,0 +1,180 @@
+<!--pages/index/index.wxml-->
+<view class="container">
+  <view class="header">
+    <text class="title">墨水屏蓝牙传输</text>
+    <view class="status {{connected ? 'success' : ''}}">
+      {{bluetoothReady ? '蓝牙已开启' : '蓝牙未开启'}} |
+      {{connected ? '已连接' : '未连接'}}
+    </view>
+  </view>
+
+  <!-- 标签页切换 -->
+  <view class="tabs">
+    <view class="tab {{currentTab === 0 ? 'active' : ''}}" bindtap="switchTab" data-index="0">
+      <text>蓝牙连接</text>
+    </view>
+    <view class="tab {{currentTab === 1 ? 'active' : ''}}" bindtap="switchTab" data-index="1">
+      <text>图片处理</text>
+    </view>
+  </view>
+
+  <!-- 蓝牙连接面板 -->
+  <view class="tab-content" wx:if="{{currentTab === 0}}">
+    <!-- 操作按钮 -->
+    <view class="actions">
+      <button class="action-btn" wx:if="{{!bluetoothReady}}" type="primary" bindtap="initBluetooth">开启蓝牙</button>
+      <button class="action-btn" wx:if="{{bluetoothReady && !searching}}" type="default" bindtap="startSearch">开始扫描</button>
+      <button class="action-btn" wx:if="{{searching}}" type="warn" bindtap="stopSearch">停止扫描</button>
+      <button class="action-btn" wx:if="{{connected}}" type="warn" bindtap="disconnect">断开连接</button>
+    </view>
+
+    <!-- 搜索状态 -->
+    <view wx:if="{{searching}}" class="searching">
+      <text>正在搜索设备...</text>
+      <view class="loading"></view>
+    </view>
+
+    <!-- 设备列表 -->
+    <view class="device-list">
+      <text class="list-title">发现 {{devices.length}} 个设备</text>
+
+      <scroll-view scroll-y class="scroll-area">
+        <view
+          wx:for="{{devices}}"
+          wx:key="deviceId"
+          class="device-item {{connected && item.deviceId === currentDeviceId ? 'active' : ''}}"
+          bindtap="connectDevice"
+          data-device="{{item}}"
+        >
+          <view class="device-info">
+            <text class="device-name">{{item.name || '未知设备'}}</text>
+            <text class="device-id">{{item.deviceId}}</text>
+          </view>
+          <view class="device-rssi">信号: {{item.RSSI}} dBm</view>
+          <view class="device-status">
+            <text wx:if="{{connected && item.deviceId === currentDeviceId}}">已连接</text>
+            <text wx:else>连接</text>
+          </view>
+        </view>
+
+        <view wx:if="{{devices.length === 0 && bluetoothReady}}" class="empty">
+          <text>暂无发现设备</text>
+        </view>
+      </scroll-view>
+    </view>
+
+    <!-- 已连接设备信息 -->
+    <view wx:if="{{connected && services.length > 0}}" class="services">
+      <text class="list-title">服务列表 ({{services.length}})</text>
+      <view wx:for="{{services}}" wx:key="uuid" class="service-item">
+        <text class="service-uuid">服务: {{item.uuid}}</text>
+        <text class="service-char">特征值数量: {{item.characteristics.length}}</text>
+      </view>
+    </view>
+  </view>
+
+  <!-- 图片处理面板 -->
+  <view class="tab-content" wx:if="{{currentTab === 1}}">
+    <!-- 选择图片 -->
+    <view class="image-section">
+      <button class="btn-choose" bindtap="chooseImage">
+        <text>{{imageSrc ? '重新选择图片' : '选择图片'}}</text>
+      </button>
+
+      <!-- 尺寸选择 -->
+      <view class="crop-size-selector" wx:if="{{imageSrc}}">
+        <view class="size-option {{cropWidth === 800 ? 'active' : ''}}" bindtap="selectCropSize" data-size="800">
+          <text class="size-name">横屏</text>
+          <text class="size-value">800x480</text>
+        </view>
+        <view class="size-option {{cropWidth === 480 ? 'active' : ''}}" bindtap="selectCropSize" data-size="480">
+          <text class="size-name">竖屏</text>
+          <text class="size-value">480x800</text>
+        </view>
+      </view>
+
+      <!-- 裁剪按钮 -->
+      <button class="btn-crop" wx:if="{{imageSrc}}" bindtap="cropImage">
+        <text>裁剪图片 ({{cropWidth}}x{{cropHeight}})</text>
+      </button>
+
+      <!-- 原图预览 -->
+      <view class="preview-box" wx:if="{{imageSrc}}">
+        <text class="preview-label">当前图片</text>
+        <image class="preview-img" src="{{imageSrc}}" mode="aspectFit" />
+      </view>
+    </view>
+
+    <!-- 抖动算法选择 -->
+    <view class="dither-section" wx:if="{{imageSrc}}">
+      <view class="section-title">
+        <text>抖动算法</text>
+        <text class="toggle-btn" bindtap="toggleEnhancePanel">{{showEnhance ? '收起参数' : '调整参数'}}</text>
+      </view>
+
+      <view class="algorithm-list">
+        <view
+          wx:for="{{algorithms}}"
+          wx:key="id"
+          class="algo-item {{selectedAlgo === item.id ? 'active' : ''}}"
+          bindtap="selectAlgo"
+          data-id="{{item.id}}"
+        >
+          <text class="algo-name">{{item.name}}</text>
+          <text class="algo-desc">{{item.desc}}</text>
+        </view>
+      </view>
+
+      <!-- 增强参数面板 -->
+      <view class="enhance-panel {{showEnhance ? 'show' : ''}}" wx:if="{{showEnhance}}">
+        <view class="param-row">
+          <text class="param-label">亮度 {{enhanceParams.brightness}}</text>
+          <slider class="param-slider" min="0.5" max="1.5" step="0.05" value="{{enhanceParams.brightness}}" data-key="brightness" bindchange="onParamChange" />
+        </view>
+        <view class="param-row">
+          <text class="param-label">对比度 {{enhanceParams.contrast}}</text>
+          <slider class="param-slider" min="0.5" max="1.5" step="0.05" value="{{enhanceParams.contrast}}" data-key="contrast" bindchange="onParamChange" />
+        </view>
+        <view class="param-row">
+          <text class="param-label">饱和度 {{enhanceParams.saturation}}</text>
+          <slider class="param-slider" min="0.5" max="2" step="0.05" value="{{enhanceParams.saturation}}" data-key="saturation" bindchange="onParamChange" />
+        </view>
+        <view class="param-row">
+          <text class="param-label">Gamma {{enhanceParams.gamma}}</text>
+          <slider class="param-slider" min="0.3" max="1.5" step="0.05" value="{{enhanceParams.gamma}}" data-key="gamma" bindchange="onParamChange" />
+        </view>
+        <button class="btn-reset" bindtap="resetParams">重置参数</button>
+      </view>
+
+      <!-- 处理按钮 -->
+      <button class="btn-process" bindtap="processImage" loading="{{processing}}" disabled="{{processing}}">
+        {{processing ? '处理中...' : '应用抖动算法'}}
+      </button>
+
+      <!-- 处理结果 -->
+      <view class="result-box" wx:if="{{processedSrc}}">
+        <text class="preview-label">处理结果 (7色墨水屏)</text>
+        <image class="preview-img" src="{{processedSrc}}" mode="aspectFit" />
+        <view class="result-actions">
+          <button class="btn-action" bindtap="saveImage">保存图片</button>
+          <button class="btn-action btn-send" wx:if="{{connected}}" bindtap="sendToDevice">发送到设备</button>
+        </view>
+      </view>
+    </view>
+
+    <!-- 调色板展示 -->
+    <view class="palette-section">
+      <text class="section-title">调色板颜色统计</text>
+      <view class="palette-stats">
+        <view class="palette-stat-item" wx:for="{{colorStats}}" wx:key="code">
+          <view class="color-preview" style="background: {{item.color}}"></view>
+          <text class="color-name">{{item.name}}</text>
+          <text class="color-percent">{{item.percent}}%</text>
+        </view>
+        <view class="palette-stat-item" wx:if="{{colorStats.length === 0}}">
+          <text class="color-hint">处理图片后显示颜色统计</text>
+        </view>
+      </view>
+    </view>
+  </view>
+</view>

@@ -1,0 +1,117 @@
+<!--pages/dither/dither.wxml-->
+<view class="container">
+  <view class="header">
+    <text class="title">墨水屏抖动算法</text>
+    <text class="subtitle">7色 E-Paper Display Converter</text>
+  </view>
+
+  <!-- 控制面板 -->
+  <view class="control-panel">
+    <button class="btn btn-primary" bindtap="chooseImage">
+      <text>选择图片</text>
+    </button>
+
+    <view class="dither-selector">
+      <text class="label">抖动算法</text>
+      <picker class="picker" mode="selector" range="{{ditherAlgorithms}}" range-key="name" value="{{ditherIndex}}" bindchange="onDitherChange">
+        <view class="picker-text">
+          {{currentDitherName}}
+          <text class="picker-desc" wx:if="{{currentDitherDesc}}"> - {{currentDitherDesc}}</text>
+        </view>
+      </picker>
+    </view>
+
+    <view class="row">
+      <button class="btn btn-secondary" bindtap="toggleEnhancePanel">
+        <text>{{showEnhancePanel ? '隐藏' : '显示'}}增强参数</text>
+      </button>
+      <button class="btn btn-secondary" bindtap="resetParams">
+        <text>重置</text>
+      </button>
+    </view>
+  </view>
+
+  <!-- 增强参数面板 -->
+  <view class="enhance-panel {{showEnhancePanel ? 'show' : ''}}">
+    <view class="param-row">
+      <text class="param-label">亮度</text>
+      <slider class="slider" min="0.5" max="1.5" step="0.05" value="{{enhanceParams.brightness}}" data-field="brightness" bindchange="onSliderChange" />
+      <text class="param-value">{{enhanceParams.brightness}}</text>
+    </view>
+    <view class="param-row">
+      <text class="param-label">对比度</text>
+      <slider class="slider" min="0.5" max="1.5" step="0.05" value="{{enhanceParams.contrast}}" data-field="contrast" bindchange="onSliderChange" />
+      <text class="param-value">{{enhanceParams.contrast}}</text>
+    </view>
+    <view class="param-row">
+      <text class="param-label">饱和度</text>
+      <slider class="slider" min="0.5" max="2" step="0.05" value="{{enhanceParams.saturation}}" data-field="saturation" bindchange="onSliderChange" />
+      <text class="param-value">{{enhanceParams.saturation}}</text>
+    </view>
+    <view class="param-row">
+      <text class="param-label">Gamma</text>
+      <slider class="slider" min="0.3" max="1.5" step="0.05" value="{{enhanceParams.gamma}}" data-field="gamma" bindchange="onSliderChange" />
+      <text class="param-value">{{enhanceParams.gamma}}</text>
+    </view>
+    <view class="param-row">
+      <text class="param-label">暖色调</text>
+      <slider class="slider" min="0.8" max="1.3" step="0.05" value="{{enhanceParams.warmth}}" data-field="warmth" bindchange="onSliderChange" />
+      <text class="param-value">{{enhanceParams.warmth}}</text>
+    </view>
+  </view>
+
+  <!-- 图片预览区 -->
+  <view class="preview-area" wx:if="{{src}}">
+    <view class="image-container">
+      <text class="image-label">原图</text>
+      <image class="preview-image" src="{{src}}" mode="aspectFit" />
+    </view>
+
+    <button class="btn btn-process" bindtap="processImage" loading="{{loading}}" disabled="{{loading}}">
+      {{loading ? '处理中...' : '应用抖动'}}
+    </button>
+
+    <view class="image-container" wx:if="{{ditheredSrc}}">
+      <text class="image-label">抖动后</text>
+      <image class="preview-image" src="{{ditheredSrc}}" mode="aspectFit" />
+      <button class="btn btn-save" bindtap="saveImage">保存图片</button>
+    </view>
+  </view>
+
+  <!-- 颜色统计 -->
+  <view class="color-stats" wx:if="{{colorStats.length > 0}}">
+    <text class="stats-title">颜色统计</text>
+    <view class="color-list">
+      <view class="color-item" wx:for="{{colorStats}}" wx:key="code">
+        <view class="color-dot" style="background: {{item.hex}}"></view>
+        <text class="color-name">{{item.name}}</text>
+        <text class="color-percent">{{item.percent}}%</text>
+      </view>
+    </view>
+  </view>
+
+  <!-- 7色调色板展示 -->
+  <view class="palette">
+    <text class="palette-title">7色调色板</text>
+    <view class="palette-colors">
+      <view class="palette-color" style="background: #000000">
+        <text class="color-label">黑</text>
+      </view>
+      <view class="palette-color" style="background: #FFFFFF">
+        <text class="color-label">白</text>
+      </view>
+      <view class="palette-color" style="background: #FFFF00">
+        <text class="color-label">黄</text>
+      </view>
+      <view class="palette-color" style="background: #FF0000">
+        <text class="color-label">红</text>
+      </view>
+      <view class="palette-color" style="background: #0000FF">
+        <text class="color-label">蓝</text>
+      </view>
+      <view class="palette-color" style="background: #00FF00">
+        <text class="color-label">绿</text>
+      </view>
+    </view>
+  </view>
+</view>

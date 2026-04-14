@@ -1,0 +1,43 @@
+<!--pages/crop/crop.wxml-->
+<view class="container">
+  <view class="header">
+    <text class="title">裁剪图片</text>
+    <text class="subtitle">{{cropWidth}}x{{cropHeight}}</text>
+  </view>
+
+  <!-- 尺寸选择 -->
+  <view class="size-selector">
+    <view class="size-option {{cropWidth === 800 && cropHeight === 480 ? 'active' : ''}}" bindtap="selectSize" data-w="800" data-h="480">
+      <text class="size-name">横屏</text>
+      <text class="size-value">800x480</text>
+    </view>
+    <view class="size-option {{cropWidth === 480 && cropHeight === 800 ? 'active' : ''}}" bindtap="selectSize" data-w="480" data-h="800">
+      <text class="size-name">竖屏</text>
+      <text class="size-value">480x800</text>
+    </view>
+  </view>
+
+  <!-- 画布区域 -->
+  <view class="canvas-container">
+    <canvas
+      type="2d"
+      id="cropCanvas"
+      class="crop-canvas"
+      style="width: {{canvasWidth}}px; height: {{canvasHeight}}px;"
+      bindtouchstart="touchStart"
+      bindtouchmove="touchMove"
+      bindtouchend="touchEnd"
+    ></canvas>
+  </view>
+
+  <!-- 提示信息 -->
+  <view class="tips">
+    <text class="tip-text">提示：拖动调整裁剪区域</text>
+  </view>
+
+  <!-- 操作按钮 -->
+  <view class="actions">
+    <button class="btn btn-cancel" bindtap="cancel">取消</button>
+    <button class="btn btn-confirm" bindtap="confirmCrop">确认裁剪</button>
+  </view>
+</view>

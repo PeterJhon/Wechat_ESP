@@ -1,0 +1,117 @@
+/* pages/crop/crop.wxss */
+.container {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: #1a1a1a;
+}
+
+.header {
+  text-align: center;
+  padding: 20rpx;
+  background: #2a2a2a;
+}
+
+.title {
+  display: block;
+  font-size: 36rpx;
+  font-weight: bold;
+  color: #fff;
+}
+
+.subtitle {
+  display: block;
+  font-size: 24rpx;
+  color: #999;
+  margin-top: 8rpx;
+}
+
+/* 尺寸选择器 */
+.size-selector {
+  display: flex;
+  gap: 15rpx;
+  padding: 15rpx 20rpx;
+  background: #2a2a2a;
+}
+
+.size-option {
+  flex: 1;
+  padding: 20rpx;
+  background: #333;
+  border-radius: 12rpx;
+  text-align: center;
+  border: 2rpx solid transparent;
+  transition: all 0.3s;
+}
+
+.size-option.active {
+  background: #3a5a3a;
+  border-color: #07c160;
+}
+
+.size-name {
+  display: block;
+  font-size: 26rpx;
+  color: #fff;
+  margin-bottom: 6rpx;
+}
+
+.size-value {
+  display: block;
+  font-size: 22rpx;
+  color: #999;
+}
+
+.size-option.active .size-value {
+  color: #07c160;
+}
+
+.canvas-container {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20rpx;
+  overflow: hidden;
+}
+
+.crop-canvas {
+  background: #000;
+  border-radius: 8rpx;
+}
+
+.tips {
+  padding: 20rpx;
+  text-align: center;
+  background: #2a2a2a;
+}
+
+.tip-text {
+  font-size: 24rpx;
+  color: #07c160;
+}
+
+.actions {
+  display: flex;
+  gap: 20rpx;
+  padding: 20rpx;
+  background: #2a2a2a;
+}
+
+.btn {
+  flex: 1;
+  height: 80rpx;
+  line-height: 80rpx;
+  font-size: 30rpx;
+  border-radius: 12rpx;
+}
+
+.btn-cancel {
+  background: #555;
+  color: #fff;
+}
+
+.btn-confirm {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: #fff;
+}
