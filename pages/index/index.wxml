@@ -71,6 +71,39 @@
         <text class="service-char">特征值数量: {{item.characteristics.length}}</text>
       </view>
     </view>
+
+    <!-- 文件管理 -->
+    <view wx:if="{{connected && notifyEnabled}}" class="file-mgr">
+      <view class="section-title">
+        <text>文件管理</text>
+        <text class="toggle-btn" bindtap="requestFileList">{{loadingFiles ? '刷新中...' : '刷新'}}</text>
+      </view>
+
+      <!-- 加载中 -->
+      <view wx:if="{{loadingFiles}}" class="file-loading">
+        <view class="loading"></view>
+        <text>加载文件列表...</text>
+      </view>
+
+      <!-- 空状态 -->
+      <view wx:elif="{{imageFiles.length === 0}}" class="file-empty">
+        <text>暂无图片文件</text>
+      </view>
+
+      <!-- 文件列表 -->
+      <scroll-view wx:else scroll-y class="file-scroll">
+        <view wx:for="{{imageFiles}}" wx:key="id" class="file-row">
+          <view class="file-info">
+            <text class="file-id">#{{item.id}}</text>
+            <text class="file-size">{{item.size}}</text>
+          </view>
+          <view class="file-actions">
+            <button class="file-btn file-btn-show" bindtap="selectImage" data-id="{{item.id}}">显示</button>
+            <button class="file-btn file-btn-del" bindtap="deleteImage" data-id="{{item.id}}">删除</button>
+          </view>
+        </view>
+      </scroll-view>
+    </view>
   </view>
 
   <!-- 图片处理面板 -->
@@ -157,7 +190,13 @@
         <image class="preview-img" src="{{processedSrc}}" mode="aspectFit" />
         <view class="result-actions">
           <button class="btn-action" bindtap="saveImage">保存图片</button>
-          <button class="btn-action btn-send" wx:if="{{connected}}" bindtap="sendToDevice">发送到设备</button>
+          <button class="btn-action btn-send" wx:if="{{connected}}" bindtap="sendToDevice" loading="{{sending}}" disabled="{{sending}}">
+            {{sending ? '发送中 ' + sendProgress + '%' : '发送到设备'}}
+          </button>
+        </view>
+        <view wx:if="{{sending}}" class="progress-bar">
+          <view class="progress-fill" style="width: {{sendProgress}}%"></view>
+          <text class="progress-text">{{sendProgress}}%</text>
         </view>
       </view>
     </view>
