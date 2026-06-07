@@ -572,3 +572,35 @@
   background: #ff4444;
   color: #fff;
 }
+
+/* 轮播设置 */
+.slideshow-panel {
+  background: #fff;
+  border-radius: 10rpx;
+  padding: 20rpx;
+  margin-top: 20rpx;
+}
+
+.slideshow-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16rpx 0;
+}
+
+.slideshow-label {
+  font-size: 28rpx;
+  color: #333;
+}
+
+.slideshow-value {
+  font-size: 22rpx;
+  color: #999;
+  width: 60rpx;
+  text-align: center;
+}
+
+.slideshow-slider {
+  flex: 1;
+  margin: 0 10rpx;
+}

@@ -104,6 +104,25 @@
         </view>
       </scroll-view>
     </view>
+
+    <!-- 轮播设置 -->
+    <view wx:if="{{connected && notifyEnabled}}" class="slideshow-panel">
+      <view class="section-title">
+        <text>轮播设置</text>
+      </view>
+      <view class="slideshow-row">
+        <text class="slideshow-label">启用轮播</text>
+        <switch checked="{{slideshowEnabled}}" bindchange="onSlideshowToggle" />
+      </view>
+      <view class="slideshow-row">
+        <text class="slideshow-label">间隔时间: {{slideshowInterval}}秒</text>
+      </view>
+      <view class="slideshow-row">
+        <text class="slideshow-value">10s</text>
+        <slider class="slideshow-slider" min="10" max="300" step="5" value="{{slideshowInterval}}" bindchange="onSlideshowIntervalChange" />
+        <text class="slideshow-value">300s</text>
+      </view>
+    </view>
   </view>
 
   <!-- 图片处理面板 -->

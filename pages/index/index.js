@@ -52,7 +52,11 @@ Page({
     // 文件管理
     imageFiles: [],           // {id, size}
     loadingFiles: false,
-    fileListBuffer: []        // accumulated notify data for FILE_LIST response
+    fileListBuffer: [],       // accumulated notify data for FILE_LIST response
+
+    // 轮播设置
+    slideshowEnabled: false,
+    slideshowInterval: 30
   },
 
   onLoad() {
@@ -306,6 +310,8 @@ Page({
       success: () => {
         console.log('Notify 已启用')
         this.setData({ notifyEnabled: true })
+        // Query slideshow state after connection
+        setTimeout(() => this.querySlideshowState(), 300)
         wx.onBLECharacteristicValueChange((res) => {
           const buf = new Uint8Array(res.value)
           console.log('收到数据(' + buf.length + 'B):', Array.from(buf.slice(0, 8)))
@@ -336,6 +342,16 @@ Page({
                 this.setData({ fileListBuffer: combined })
               }
             }
+          }
+          // Parse SLIDESHOW_STATE response (0x14)
+          if (buf.length >= 4 && buf[0] === 0x14) {
+            const enabled = buf[1] !== 0
+            const interval = buf[2] | (buf[3] << 8)
+            console.log('轮播状态: enabled=' + enabled + ' interval=' + interval)
+            this.setData({
+              slideshowEnabled: enabled,
+              slideshowInterval: interval
+            })
           }
         })
       },
@@ -948,6 +964,70 @@ Page({
     if (bytes < 1024) return bytes + ' B'
     if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
     return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
+  },
+
+  /**
+   * 查询轮播状态 (CMD_SLIDESHOW_STATE = 0x14)
+   */
+  querySlideshowState() {
+    if (!this.data.connected) return
+    const deviceId = this.data.currentDeviceId
+    const serviceId = this.data.writeServiceId
+    const charId = this.data.writeCharacteristicId
+    if (!serviceId || !charId) return
+
+    const cmd = new Uint8Array([0x14])
+    const ab = cmd.buffer.slice(cmd.byteOffset, cmd.byteOffset + cmd.byteLength)
+
+    wx.writeBLECharacteristicValue({
+      deviceId, serviceId, characteristicId: charId,
+      value: ab,
+      success: () => console.log('SLIDESHOW_STATE 请求已发送'),
+      fail: (err) => console.error('SLIDESHOW_STATE 发送失败:', err)
+    })
+  },
+
+  /**
+   * 发送轮播配置 (CMD_SLIDESHOW_CTRL = 0x13)
+   */
+  sendSlideshowConfig(enabled, interval) {
+    if (!this.data.connected) return
+    const deviceId = this.data.currentDeviceId
+    const serviceId = this.data.writeServiceId
+    const charId = this.data.writeCharacteristicId
+    if (!serviceId || !charId) return
+
+    const cmd = new Uint8Array(4)
+    cmd[0] = 0x13
+    cmd[1] = enabled ? 1 : 0
+    cmd[2] = interval & 0xFF
+    cmd[3] = (interval >> 8) & 0xFF
+    const ab = cmd.buffer.slice(cmd.byteOffset, cmd.byteOffset + cmd.byteLength)
+
+    wx.writeBLECharacteristicValue({
+      deviceId, serviceId, characteristicId: charId,
+      value: ab,
+      success: () => console.log('SLIDESHOW_CTRL 已发送: enabled=' + enabled + ' interval=' + interval),
+      fail: (err) => console.error('SLIDESHOW_CTRL 发送失败:', err)
+    })
+  },
+
+  /**
+   * 轮播开关切换
+   */
+  onSlideshowToggle(e) {
+    const enabled = e.detail.value
+    this.setData({ slideshowEnabled: enabled })
+    this.sendSlideshowConfig(enabled, this.data.slideshowInterval)
+  },
+
+  /**
+   * 轮播间隔变化
+   */
+  onSlideshowIntervalChange(e) {
+    const interval = parseInt(e.detail.value)
+    this.setData({ slideshowInterval: interval })
+    this.sendSlideshowConfig(this.data.slideshowEnabled, interval)
   },
 
   sleep(ms) {
