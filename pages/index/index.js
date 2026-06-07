@@ -61,6 +61,16 @@ Page({
 
   onLoad() {
     this.checkBluetooth()
+    this._lastImageSrc = ''
+  },
+
+  onShow() {
+    // Coming back from crop page: image may have been replaced
+    if (this.data.imageSrc && this.data.imageSrc !== this._lastImageSrc) {
+      this._rawPixels = null
+      this._lastImageSrc = this.data.imageSrc
+      this.rasterizeSource(this.data.imageSrc)
+    }
   },
 
   onUnload() {
@@ -458,12 +468,17 @@ Page({
       mediaType: ['image'],
       sourceType: ['album', 'camera'],
       success: (res) => {
+        const imagePath = res.tempFiles[0].tempFilePath
+        this.processedBinary = null
+        this._lastImageSrc = imagePath
+        this._rawPixels = null  // invalidate cache for new image
         this.setData({
-          imageSrc: res.tempFiles[0].tempFilePath,
+          imageSrc: imagePath,
           processedSrc: '',
-          processedBinary: null,
           colorStats: []
         })
+        // Pre-rasterize so processImage() can skip image loading
+        this.rasterizeSource(imagePath)
       }
     })
   },
@@ -537,70 +552,112 @@ Page({
   /**
    * 处理图片
    */
+  /**
+   * 栅格化原始图片，缓存像素数据，后续换算法无需重新加载图片
+   */
+  async rasterizeSource(imagePath) {
+    try {
+      const imgInfo = await new Promise((resolve, reject) => {
+        wx.getImageInfo({ src: imagePath, success: resolve, fail: reject })
+      })
+
+      const maxSize = 800
+      let w = imgInfo.width, h = imgInfo.height
+      if (w > maxSize || h > maxSize) {
+        const ratio = Math.min(maxSize / w, maxSize / h)
+        w = Math.floor(w * ratio)
+        h = Math.floor(h * ratio)
+      }
+
+      const canvas = wx.createOffscreenCanvas({ type: '2d', width: w, height: h })
+      const ctx = canvas.getContext('2d')
+      const img = canvas.createImage()
+
+      await new Promise((resolve, reject) => {
+        img.onload = resolve
+        img.onerror = reject
+        img.src = imagePath
+      })
+      ctx.drawImage(img, 0, 0, w, h)
+
+      const imageData = ctx.getImageData(0, 0, w, h)
+      this._rawPixels = new Uint8ClampedArray(imageData.data)
+      this._rawWidth = w
+      this._rawHeight = h
+      console.log('Source rasterized: ' + w + 'x' + h)
+    } catch (e) {
+      console.error('Rasterize failed:', e)
+      this._rawPixels = null
+    }
+  },
+
+  /**
+   * 处理图片
+   */
   async processImage() {
     if (!this.data.imageSrc) return
 
     this.setData({ processing: true })
 
     try {
-      // 获取图片信息
-      const imgInfo = await new Promise((resolve, reject) => {
-        wx.getImageInfo({
-          src: this.data.imageSrc,
-          success: resolve,
-          fail: reject
-        })
-      })
+      let width, height
+      let imageData
 
-      // 计算尺寸
-      const maxSize = 800
-      let width = imgInfo.width
-      let height = imgInfo.height
-      if (width > maxSize || height > maxSize) {
-        const ratio = Math.min(maxSize / width, maxSize / height)
-        width = Math.floor(width * ratio)
-        height = Math.floor(height * ratio)
+      // 优先使用缓存的原始像素数据，避免重复加载图片导致 onload 不触发而卡死
+      if (this._rawPixels && this._rawWidth && this._rawHeight) {
+        width = this._rawWidth
+        height = this._rawHeight
+      } else {
+        // 首次处理：加载图片并缓存
+        const imgInfo = await new Promise((resolve, reject) => {
+          wx.getImageInfo({ src: this.data.imageSrc, success: resolve, fail: reject })
+        })
+
+        const maxSize = 800
+        width = imgInfo.width
+        height = imgInfo.height
+        if (width > maxSize || height > maxSize) {
+          const ratio = Math.min(maxSize / width, maxSize / height)
+          width = Math.floor(width * ratio)
+          height = Math.floor(height * ratio)
+        }
+
+        const loadCanvas = wx.createOffscreenCanvas({ type: '2d', width, height })
+        const loadCtx = loadCanvas.getContext('2d')
+        const img = loadCanvas.createImage()
+        await new Promise((resolve, reject) => {
+          img.onload = resolve
+          img.onerror = reject
+          img.src = this.data.imageSrc
+        })
+        loadCtx.drawImage(img, 0, 0, width, height)
+
+        const rawData = loadCtx.getImageData(0, 0, width, height)
+        this._rawPixels = new Uint8ClampedArray(rawData.data)
+        this._rawWidth = width
+        this._rawHeight = height
+        console.log('Source rasterized (first): ' + width + 'x' + height)
       }
 
-      // 创建离屏 canvas
-      const canvas = wx.createOffscreenCanvas({
-        type: '2d',
-        width,
-        height
-      })
+      // 创建输出 canvas 并从缓存复制原始像素
+      const canvas = wx.createOffscreenCanvas({ type: '2d', width, height })
       const ctx = canvas.getContext('2d')
-
-      // 绘制图片
-      const img = canvas.createImage()
-      await new Promise((resolve, reject) => {
-        img.onload = resolve
-        img.onerror = reject
-        img.src = this.data.imageSrc
-      })
-      ctx.drawImage(img, 0, 0, width, height)
-
-      // 获取图像数据
-      const imageData = ctx.getImageData(0, 0, width, height)
+      imageData = ctx.createImageData(width, height)
+      imageData.data.set(this._rawPixels)
       const originalData = imageData.data
 
-      // 应用抖动算法 - 返回的是处理后的数据对象
-      const processedData = processImageData(imageData, {
-        dither: this.data.selectedAlgo,
-        ...this.data.enhanceParams
-      })
-
-      // 生成二进制数据
+      // 应用抖动算法
       const colorCodes = convertToEPD(imageData, {
         dither: this.data.selectedAlgo,
         ...this.data.enhanceParams
       })
+      const processedData = colorCodesToImageData(colorCodes, width, height)
 
-      // 竖屏图片需要转置，因为 EPD 硬件固定为 800x480 横屏布局
-      // 转置后: 原图左边缘 → 显示顶部，避免逐行读取错位导致的乱码
+      // 竖屏图片需要转置
       let finalColorCodes = colorCodes
       if (colorCodes.length > (colorCodes[0] || []).length) {
-        const h = colorCodes.length       // 800 (竖屏时)
-        const w = colorCodes[0].length    // 480
+        const h = colorCodes.length
+        const w = colorCodes[0].length
         const transposed = []
         for (let x = 0; x < w; x++) {
           const row = new Array(h)
@@ -614,24 +671,18 @@ Page({
       }
 
       const binary = colorCodesToBinary(finalColorCodes)
-
-      // 统计颜色使用情况
       const colorStats = this.analyzeColorStats(finalColorCodes)
 
-      // 直接修改原 imageData 的数据（复用同一个对象）
+      // 将处理结果写入 canvas
       for (let i = 0; i < originalData.length; i++) {
         originalData[i] = processedData.data[i]
       }
-
-      // 绘制结果
       ctx.putImageData(imageData, 0, 0)
-
-      // 导出图片
       const processedSrc = canvas.toDataURL()
 
+      this.processedBinary = binary
       this.setData({
         processedSrc,
-        processedBinary: Array.from(binary), // 转为数组便于后续处理
         colorStats,
         processing: false
       })
@@ -723,7 +774,7 @@ Page({
       wx.showToast({ title: '请先连接设备', icon: 'none' })
       return
     }
-    if (!this.data.processedBinary) {
+    if (!this.processedBinary) {
       wx.showToast({ title: '请先处理图片', icon: 'none' })
       return
     }
@@ -739,7 +790,7 @@ Page({
     const deviceId = this.data.currentDeviceId
     const serviceId = this.data.writeServiceId
     const charId = this.data.writeCharacteristicId
-    const binary = new Uint8Array(this.data.processedBinary)
+    const binary = new Uint8Array(this.processedBinary)
     const filename = '/sdcard/img.bin'
 
     this.setData({ sending: true, sendProgress: 0 })
