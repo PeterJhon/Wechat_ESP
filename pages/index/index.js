@@ -578,10 +578,29 @@ Page({
         dither: this.data.selectedAlgo,
         ...this.data.enhanceParams
       })
-      const binary = colorCodesToBinary(colorCodes)
+
+      // 竖屏图片需要转置，因为 EPD 硬件固定为 800x480 横屏布局
+      // 转置后: 原图左边缘 → 显示顶部，避免逐行读取错位导致的乱码
+      let finalColorCodes = colorCodes
+      if (colorCodes.length > (colorCodes[0] || []).length) {
+        const h = colorCodes.length       // 800 (竖屏时)
+        const w = colorCodes[0].length    // 480
+        const transposed = []
+        for (let x = 0; x < w; x++) {
+          const row = new Array(h)
+          for (let y = 0; y < h; y++) {
+            row[y] = colorCodes[y][x]
+          }
+          transposed.push(row)
+        }
+        finalColorCodes = transposed
+        console.log('竖屏图片已转置: ' + h + 'x' + w + ' → ' + w + 'x' + h)
+      }
+
+      const binary = colorCodesToBinary(finalColorCodes)
 
       // 统计颜色使用情况
-      const colorStats = this.analyzeColorStats(colorCodes)
+      const colorStats = this.analyzeColorStats(finalColorCodes)
 
       // 直接修改原 imageData 的数据（复用同一个对象）
       for (let i = 0; i < originalData.length; i++) {
