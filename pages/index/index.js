@@ -101,9 +101,20 @@ Page({
     fileTotal: 0,
     loadingFiles: false,
 
-    // 轮播设置
+    // 轮播设置。间隔同时是设备的休眠间隔，所以给档位而不是线性滑杆：
+    // 这个值直接决定续航，跨三个数量级的滑杆不好用。
     slideshowEnabled: false,
-    slideshowInterval: 30
+    slideshowInterval: 30,
+    slideshowLabel: '30 秒',
+    intervalPresets: [
+      { label: '10 秒', seconds: 10 },
+      { label: '30 秒', seconds: 30 },
+      { label: '1 分', seconds: 60 },
+      { label: '5 分', seconds: 300 },
+      { label: '15 分', seconds: 900 },
+      { label: '30 分', seconds: 1800 },
+      { label: '1 小时', seconds: 3600 }
+    ]
   },
 
   onLoad() {
@@ -434,7 +445,8 @@ Page({
             console.log('轮播状态: enabled=' + enabled + ' interval=' + interval)
             this.setData({
               slideshowEnabled: enabled,
-              slideshowInterval: interval
+              slideshowInterval: interval,
+              slideshowLabel: this.formatInterval(interval)
             })
           }
         })
@@ -2019,9 +2031,22 @@ Page({
   /**
    * 轮播间隔变化
    */
-  onSlideshowIntervalChange(e) {
-    this.setData({ slideshowInterval: parseInt(e.detail.value) })
+  selectInterval(e) {
+    const seconds = parseInt(e.currentTarget.dataset.seconds)
+    if (seconds === this.data.slideshowInterval) return
+    this.setData({
+      slideshowInterval: seconds,
+      slideshowLabel: this.formatInterval(seconds)
+    })
     this.queueSlideshowConfig()
+  },
+
+  /** 秒数转成人看得懂的写法 */
+  formatInterval(seconds) {
+    if (seconds < 60) return seconds + ' 秒'
+    if (seconds < 3600) return Math.round(seconds / 60) + ' 分'
+    const hours = seconds / 3600
+    return (hours % 1 === 0 ? hours : hours.toFixed(1)) + ' 小时'
   },
 
   sleep(ms) {

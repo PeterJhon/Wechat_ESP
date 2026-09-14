@@ -413,14 +413,32 @@ button::after {
   color: #07c160;
 }
 
-.slideshow-bound {
-  font-size: 20rpx;
-  color: #a2a8b0;
+/* 间隔档位：胶囊按钮，比跨三个数量级的线性滑杆好用 */
+.preset-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12rpx;
+  padding-top: 14rpx;
 }
 
-.slideshow-slider {
-  flex: 1;
-  margin: 0 8rpx;
+.preset {
+  padding: 12rpx 26rpx;
+  border-radius: 999rpx;
+  font-size: 24rpx;
+  color: #646a73;
+  background: #f0f2f5;
+}
+
+.preset.active {
+  background: #07c160;
+  color: #fff;
+}
+
+.preset-hint {
+  display: block;
+  padding-top: 16rpx;
+  font-size: 21rpx;
+  color: #a2a8b0;
 }
 
 /* ============ 图片处理 ============ */

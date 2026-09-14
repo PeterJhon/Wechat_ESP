@@ -119,13 +119,14 @@
       </view>
       <view class="slideshow-row">
         <text class="slideshow-label">间隔</text>
-        <text class="slideshow-value">{{slideshowInterval}} 秒</text>
+        <text class="slideshow-value">{{slideshowLabel}}</text>
       </view>
-      <view class="slideshow-row">
-        <text class="slideshow-bound">10s</text>
-        <slider class="slideshow-slider" min="10" max="300" step="5" value="{{slideshowInterval}}" bindchange="onSlideshowIntervalChange" />
-        <text class="slideshow-bound">300s</text>
+      <view class="preset-list">
+        <view wx:for="{{intervalPresets}}" wx:key="seconds"
+              class="preset {{slideshowInterval === item.seconds ? 'active' : ''}}"
+              bindtap="selectInterval" data-seconds="{{item.seconds}}">{{item.label}}</view>
       </view>
+      <text class="preset-hint">这个间隔同时是设备的休眠间隔：越长越省电</text>
     </view>
   </view>
 
