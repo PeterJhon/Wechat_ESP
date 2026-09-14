@@ -39,6 +39,11 @@ const THUMB_BATCH_SIZE = 10
 const SLIDESHOW_DEBOUNCE_MS = 400
 const SLIDESHOW_RETRY_MS = 500
 const SLIDESHOW_MAX_RETRIES = 3
+// 实时预览：缩小到这个宽度跑抖动。整图是 384000 像素的逐点运算，
+// 要几百毫秒，跟不上滑杆拖动；缩小图约 1/11 的像素量，几十毫秒。
+const PREVIEW_DITHER_WIDTH = 240
+// 连续渲染之间的最小间隔，避免拖动时把 JS 线程占满
+const LIVE_PREVIEW_INTERVAL_MS = 120
 const MAX_PREVIEW_STEPS = 500
 const MAX_PREVIEW_BUSY_RETRIES = 40
 
@@ -110,6 +115,8 @@ Page({
     // Coming back from crop page: image may have been replaced
     if (this.data.imageSrc && this.data.imageSrc !== this._lastImageSrc) {
       this._rawPixels = null
+      this._rasterCanvas = null
+      this._renderKey = null
       // the source changed, so any processed result and its preview are stale
       this.processedBinary = null
       this._previewBuffer = null
@@ -127,9 +134,12 @@ Page({
    * 切换标签页
    */
   switchTab(e) {
-    this.setData({
-      currentTab: parseInt(e.currentTarget.dataset.index)
-    })
+    const currentTab = parseInt(e.currentTarget.dataset.index)
+    this.setData({ currentTab })
+    // 切到处理页时补一版预览：换过图但还没出过结果的话，这里补上
+    if (currentTab === 1 && this.data.imageSrc && !this.data.processedSrc) {
+      this.scheduleLivePreview()
+    }
   },
 
   // ========== 蓝牙相关方法 ==========
@@ -537,12 +547,15 @@ Page({
         this._previewBuffer = null
         this._finalColorCodes = null
         this._lastImageSrc = imagePath
-        this._rawPixels = null  // invalidate cache for new image
+        // invalidate the cached raster and the rendered result for a new image
+        this._rawPixels = null
+        this._rasterCanvas = null
+        this._renderKey = null
         this.setData({
           imageSrc: imagePath,
           processedSrc: ''
         })
-        // Pre-rasterize so processImage() can skip image loading
+        // 预先栅格化，参数变化时可直接出预览，不必重新读图
         this.rasterizeSource(imagePath)
       }
     })
@@ -576,6 +589,7 @@ Page({
     this.setData({
       selectedAlgo: e.currentTarget.dataset.id
     })
+    this.scheduleLivePreview()
   },
 
   /**
@@ -596,6 +610,7 @@ Page({
     this.setData({
       [`enhanceParams.${key}`]: value
     })
+    this.scheduleLivePreview()
   },
 
   /**
@@ -611,6 +626,7 @@ Page({
         warmth: 1.05
       }
     })
+    this.scheduleLivePreview()
     wx.showToast({ title: '参数已重置', icon: 'none' })
   },
 
@@ -672,7 +688,9 @@ Page({
     return {
       pixels: new Uint8ClampedArray(imageData.data),
       width: targetWidth,
-      height: targetHeight
+      height: targetHeight,
+      // 缩小预览要拿它当 drawImage 的源，所以一并带出去缓存
+      canvas: canvas
     }
   },
 
@@ -685,7 +703,11 @@ Page({
       this._rawPixels = raster.pixels
       this._rawWidth = raster.width
       this._rawHeight = raster.height
+      this._rasterCanvas = raster.canvas
+      this._renderKey = null
       console.log('Source rasterized to panel size: ' + raster.width + 'x' + raster.height)
+      // 选完图立刻给一版实时预览，不用再点按钮
+      this.scheduleLivePreview()
     } catch (e) {
       console.error('Rasterize failed:', e)
       this._rawPixels = null
@@ -695,85 +717,159 @@ Page({
   /**
    * 处理图片
    */
-  async processImage() {
-    if (!this.data.imageSrc) return
-
-    this.setData({ processing: true })
-
+  /**
+   * 取（并缓存）归一成面板尺寸后的像素与画布
+   */
+  async ensureRaster() {
+    if (this._rawPixels && this._rawWidth && this._rawHeight && this._rasterCanvas) {
+      return {
+        pixels: this._rawPixels,
+        width: this._rawWidth,
+        height: this._rawHeight,
+        canvas: this._rasterCanvas
+      }
+    }
     try {
-      let width, height
-      let imageData
+      const raster = await this.rasterizeToPanel(this.data.imageSrc)
+      this._rawPixels = raster.pixels
+      this._rawWidth = raster.width
+      this._rawHeight = raster.height
+      this._rasterCanvas = raster.canvas
+      this._renderKey = null
+      return raster
+    } catch (e) {
+      console.error('栅格化失败:', e)
+      return null
+    }
+  },
 
-      // 优先使用缓存的原始像素数据，避免重复加载图片导致 onload 不触发而卡死
-      if (this._rawPixels && this._rawWidth && this._rawHeight) {
-        width = this._rawWidth
-        height = this._rawHeight
-      } else {
-        // 首次处理：加载图片、归一成面板尺寸并缓存
-        const raster = await this.rasterizeToPanel(this.data.imageSrc)
-        width = raster.width
-        height = raster.height
-        this._rawPixels = raster.pixels
-        this._rawWidth = width
-        this._rawHeight = height
-        console.log('Source rasterized (first) to panel size: ' + width + 'x' + height)
-      }
+  /**
+   * 按当前算法与参数渲染。
+   *
+   * fullScale=false 时在缩小图上跑抖动，供滑杆拖动时实时预览：整图是
+   * 384000 像素的逐点运算，要几百毫秒，挂在 bindchanging 上跟不上；缩小图
+   * 约 1/11 的像素量，几十毫秒就够。代价是抖动与尺度相关，预览和最终结果
+   * 不会逐像素一致 —— 效果看得出，但要发给设备仍以全分辨率那次为准。
+   */
+  async renderDither(fullScale) {
+    if (!this.data.imageSrc) return false
 
-      // 创建输出 canvas 并从缓存复制原始像素
-      const canvas = wx.createOffscreenCanvas({ type: '2d', width, height })
-      const ctx = canvas.getContext('2d')
-      imageData = ctx.createImageData(width, height)
-      imageData.data.set(this._rawPixels)
-      const originalData = imageData.data
+    const raster = await this.ensureRaster()
+    if (!raster) return false
 
-      // 应用抖动算法
-      const colorCodes = convertToEPD(imageData, {
-        dither: this.data.selectedAlgo,
-        ...this.data.enhanceParams
+    const params = this.data.enhanceParams
+    const key = [this.data.imageSrc, this.data.selectedAlgo, params.brightness,
+                 params.contrast, params.saturation, params.gamma,
+                 fullScale ? 'full' : 'preview'].join('|')
+    if (key === this._renderKey) return true
+
+    let imageData
+    let renderWidth, renderHeight
+
+    if (fullScale) {
+      renderWidth = raster.width
+      renderHeight = raster.height
+      const canvas = wx.createOffscreenCanvas({
+        type: '2d', width: renderWidth, height: renderHeight
       })
-      const processedData = colorCodesToImageData(colorCodes, width, height)
+      const ctx = canvas.getContext('2d')
+      imageData = ctx.createImageData(renderWidth, renderHeight)
+      imageData.data.set(raster.pixels)
+    } else {
+      const scale = PREVIEW_DITHER_WIDTH / raster.width
+      renderWidth = Math.max(8, Math.round(raster.width * scale))
+      renderHeight = Math.max(8, Math.round(raster.height * scale))
+      const small = wx.createOffscreenCanvas({
+        type: '2d', width: renderWidth, height: renderHeight
+      })
+      const smallCtx = small.getContext('2d')
+      smallCtx.drawImage(raster.canvas, 0, 0, renderWidth, renderHeight)
+      imageData = smallCtx.getImageData(0, 0, renderWidth, renderHeight)
+    }
 
-      // 竖屏图片需要转置
-      let finalColorCodes = colorCodes
-      if (colorCodes.length > (colorCodes[0] || []).length) {
-        const h = colorCodes.length
-        const w = colorCodes[0].length
-        const transposed = []
-        for (let x = 0; x < w; x++) {
-          const row = new Array(h)
-          for (let y = 0; y < h; y++) {
-            row[y] = colorCodes[y][x]
-          }
-          transposed.push(row)
+    const colorCodes = convertToEPD(imageData, {
+      dither: this.data.selectedAlgo,
+      ...params
+    })
+    const processedData = colorCodesToImageData(colorCodes, renderWidth, renderHeight)
+
+    // 竖屏图片发给设备前要转置
+    let finalColorCodes = colorCodes
+    if (colorCodes.length > (colorCodes[0] || []).length) {
+      const h = colorCodes.length
+      const w = colorCodes[0].length
+      const transposed = []
+      for (let x = 0; x < w; x++) {
+        const row = new Array(h)
+        for (let y = 0; y < h; y++) {
+          row[y] = colorCodes[y][x]
         }
-        finalColorCodes = transposed
-        console.log('竖屏图片已转置: ' + h + 'x' + w + ' → ' + w + 'x' + h)
+        transposed.push(row)
       }
+      finalColorCodes = transposed
+    }
 
-      const binary = colorCodesToBinary(finalColorCodes)
+    // 画出来。processedSrc 用的是转置**前**的 codes —— 竖屏图要按用户
+    // 看到的方向显示；转置只影响发给设备的字节。
+    const out = wx.createOffscreenCanvas({
+      type: '2d', width: renderWidth, height: renderHeight
+    })
+    const outCtx = out.getContext('2d')
+    const outImage = outCtx.createImageData(renderWidth, renderHeight)
+    outImage.data.set(processedData.data)
+    outCtx.putImageData(outImage, 0, 0)
+    const processedSrc = out.toDataURL()
 
-      // 预览图必须从转置后的 finalColorCodes 生成：processedSrc 是转置前的，
-      // 用它做缩略图会让竖屏图片和墨水屏上显示的差 90°。
+    this._renderKey = key
+
+    const patch = { processedSrc }
+    if (fullScale) {
+      // 只有全分辨率那次才产生可发送的数据与侧车预览的来源
+      this.processedBinary = colorCodesToBinary(finalColorCodes)
       this._finalColorCodes = finalColorCodes
       this._previewBuffer = null
+      patch.processing = false
+      console.log('已按全分辨率渲染: ' + renderWidth + 'x' + renderHeight)
+    }
+    this.setData(patch)
+    return true
+  },
 
-      // 将处理结果写入 canvas
-      for (let i = 0; i < originalData.length; i++) {
-        originalData[i] = processedData.data[i]
-      }
-      ctx.putImageData(imageData, 0, 0)
-      const processedSrc = canvas.toDataURL()
+  /** 合并连续的参数改动：正在渲染时只记一个标记，渲染完再补一次。 */
+  scheduleLivePreview() {
+    if (!this.data.imageSrc) return
+    if (this._liveBusy) {
+      this._livePending = true
+      return
+    }
+    this._liveBusy = true
+    this.runLivePreview()
+  },
 
-      this.processedBinary = binary
-      this.setData({
-        processedSrc,
-        processing: false
-      })
-
-      wx.showToast({ title: '处理完成', icon: 'success' })
+  async runLivePreview() {
+    this._livePending = false
+    try {
+      await this.renderDither(false)
     } catch (e) {
-      console.error(e)
-      wx.showToast({ title: '处理失败: ' + e.message, icon: 'none' })
+      console.error('实时预览失败:', e)
+    }
+    this._liveBusy = false
+    if (this._livePending) {
+      setTimeout(() => this.runLivePreview(), LIVE_PREVIEW_INTERVAL_MS)
+    }
+  },
+
+  /**
+   * 发送/保存前确保已按当前参数做过全分辨率渲染。
+   * 实时预览是缩小图，不能拿去发送。
+   */
+  async ensureFullResolution() {
+    this.setData({ processing: true })
+    wx.showLoading({ title: '渲染中…', mask: true })
+    try {
+      return await this.renderDither(true)
+    } finally {
+      wx.hideLoading()
       this.setData({ processing: false })
     }
   },
@@ -824,8 +920,13 @@ Page({
   /**
    * 保存图片
    */
-  saveImage() {
-    if (!this.data.processedSrc) return
+  async saveImage() {
+    if (!this.data.imageSrc) return
+
+    if (!await this.ensureFullResolution()) {
+      wx.showToast({ title: '渲染失败，无法保存', icon: 'none' })
+      return
+    }
 
     // 先检查权限
     wx.getSetting({
@@ -895,13 +996,13 @@ Page({
    * CMD_FILE_DATA  (0x02): 数据块
    * CMD_FILE_END   (0x03): 传输完成
    */
-  sendToDevice() {
+  async sendToDevice() {
     if (!this.data.connected) {
       wx.showToast({ title: '请先连接设备', icon: 'none' })
       return
     }
-    if (!this.processedBinary) {
-      wx.showToast({ title: '请先处理图片', icon: 'none' })
+    if (!this.data.imageSrc) {
+      wx.showToast({ title: '请先选择图片', icon: 'none' })
       return
     }
     if (!this.data.writeServiceId || !this.data.writeCharacteristicId) {
@@ -910,6 +1011,12 @@ Page({
     }
     if (this.data.sending) {
       wx.showToast({ title: '正在发送中...', icon: 'none' })
+      return
+    }
+
+    // 界面上的只是缩小预览，发送前必须按当前参数重跑一次全分辨率
+    if (!await this.ensureFullResolution() || !this.processedBinary) {
+      wx.showToast({ title: '渲染失败，无法发送', icon: 'none' })
       return
     }
 

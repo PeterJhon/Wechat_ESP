@@ -568,21 +568,6 @@ button::after {
   background: #fff;
 }
 
-.btn-process {
-  height: 92rpx;
-  line-height: 92rpx;
-  border-radius: 16rpx;
-  font-size: 29rpx;
-  font-weight: 500;
-  color: #fff;
-  background: #07c160;
-}
-
-.btn-process[disabled] {
-  background: #b8bec7;
-  color: #fff;
-}
-
 .result-box {
   display: flex;
   flex-direction: column;
