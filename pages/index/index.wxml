@@ -86,21 +86,27 @@
       </view>
 
       <!-- 空状态 -->
-      <view wx:elif="{{imageFiles.length === 0}}" class="file-empty">
+      <view wx:elif="{{fileTotal === 0}}" class="file-empty">
         <text>暂无图片文件</text>
       </view>
 
-      <!-- 文件列表 -->
-      <scroll-view wx:else scroll-y class="file-scroll">
-        <view wx:for="{{imageFiles}}" wx:key="id" class="file-row">
+      <!-- 文件列表：只渲染窗口内的行，滚到底再放出下一屏 -->
+      <scroll-view wx:else scroll-y class="file-scroll"
+                   bindscrolltolower="onFileListScrollToLower" lower-threshold="80">
+        <view wx:for="{{visibleFiles}}" wx:key="stem" class="file-row">
+          <image wx:if="{{item.thumb}}" class="file-thumb" src="{{item.thumb}}" mode="aspectFit" />
+          <view wx:else class="file-thumb file-thumb-empty"></view>
           <view class="file-info">
-            <text class="file-id">#{{item.id}}</text>
+            <text class="file-id">{{item.label}}</text>
             <text class="file-size">{{item.size}}</text>
           </view>
           <view class="file-actions">
-            <button class="file-btn file-btn-show" bindtap="selectImage" data-id="{{item.id}}">显示</button>
-            <button class="file-btn file-btn-del" bindtap="deleteImage" data-id="{{item.id}}">删除</button>
+            <button class="file-btn file-btn-show" bindtap="selectImage" data-stem="{{item.stem}}">显示</button>
+            <button class="file-btn file-btn-del" bindtap="deleteImage" data-stem="{{item.stem}}">删除</button>
           </view>
+        </view>
+        <view wx:if="{{renderedCount < fileTotal}}" class="file-more">
+          <text>已显示 {{renderedCount}}/{{fileTotal}}，上滑加载更多</text>
         </view>
       </scroll-view>
     </view>
