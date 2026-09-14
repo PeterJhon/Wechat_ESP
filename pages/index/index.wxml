@@ -1,17 +1,20 @@
 <!--pages/index/index.wxml-->
 <view class="container">
   <view class="header">
-    <text class="title">墨水屏蓝牙传输</text>
-    <view class="status {{connected ? 'success' : ''}}">
-      {{bluetoothReady ? '蓝牙已开启' : '蓝牙未开启'}} |
-      {{connected ? '已连接' : '未连接'}}
+    <view class="header-text">
+      <text class="title">墨水屏传输</text>
+      <text class="subtitle">EINK 电子墨水屏 · 蓝牙图片管理</text>
+    </view>
+    <view class="status-pill {{connected ? 'is-on' : (bluetoothReady ? 'is-ready' : 'is-off')}}">
+      <view class="dot"></view>
+      <text>{{connected ? '已连接' : (bluetoothReady ? '待连接' : '蓝牙关闭')}}</text>
     </view>
   </view>
 
   <!-- 标签页切换 -->
   <view class="tabs">
     <view class="tab {{currentTab === 0 ? 'active' : ''}}" bindtap="switchTab" data-index="0">
-      <text>蓝牙连接</text>
+      <text>设备与图片</text>
     </view>
     <view class="tab {{currentTab === 1 ? 'active' : ''}}" bindtap="switchTab" data-index="1">
       <text>图片处理</text>
@@ -23,20 +26,23 @@
     <!-- 操作按钮 -->
     <view class="actions">
       <button class="action-btn" wx:if="{{!bluetoothReady}}" type="primary" bindtap="initBluetooth">开启蓝牙</button>
-      <button class="action-btn" wx:if="{{bluetoothReady && !searching}}" type="default" bindtap="startSearch">开始扫描</button>
+      <button class="action-btn" wx:if="{{bluetoothReady && !searching}}" type="default" bindtap="startSearch">扫描设备</button>
       <button class="action-btn" wx:if="{{searching}}" type="warn" bindtap="stopSearch">停止扫描</button>
       <button class="action-btn" wx:if="{{connected}}" type="warn" bindtap="disconnect">断开连接</button>
     </view>
 
     <!-- 搜索状态 -->
     <view wx:if="{{searching}}" class="searching">
-      <text>正在搜索设备...</text>
       <view class="loading"></view>
+      <text>正在扫描附近设备…</text>
     </view>
 
     <!-- 设备列表 -->
-    <view class="device-list">
-      <text class="list-title">发现 {{devices.length}} 个设备</text>
+    <view class="card">
+      <view class="card-head">
+        <text class="card-title">设备</text>
+        <text class="card-hint">只显示 EINK 墨水屏</text>
+      </view>
 
       <scroll-view scroll-y class="scroll-area">
         <view
@@ -47,86 +53,78 @@
           data-device="{{item}}"
         >
           <view class="device-info">
-            <text class="device-name">{{item.name || '未知设备'}}</text>
+            <text class="device-name">{{item.name || '未命名设备'}}</text>
             <text class="device-id">{{item.deviceId}}</text>
           </view>
-          <view class="device-rssi">信号: {{item.RSSI}} dBm</view>
-          <view class="device-status">
-            <text wx:if="{{connected && item.deviceId === currentDeviceId}}">已连接</text>
-            <text wx:else>连接</text>
+          <view class="device-meta">
+            <view class="rssi rssi-{{item.signal}}">
+              <text>{{item.RSSI}} dBm</text>
+            </view>
+            <view class="device-status">
+              <text>{{connected && item.deviceId === currentDeviceId ? '已连接' : '连接'}}</text>
+            </view>
           </view>
         </view>
 
-        <view wx:if="{{devices.length === 0 && bluetoothReady}}" class="empty">
-          <text>暂无发现设备</text>
+        <view wx:if="{{devices.length === 0}}" class="empty">
+          <text>{{searching ? '扫描中…' : '未发现设备，点击扫描'}}</text>
         </view>
       </scroll-view>
     </view>
 
-    <!-- 已连接设备信息 -->
-    <view wx:if="{{connected && services.length > 0}}" class="services">
-      <text class="list-title">服务列表 ({{services.length}})</text>
-      <view wx:for="{{services}}" wx:key="uuid" class="service-item">
-        <text class="service-uuid">服务: {{item.uuid}}</text>
-        <text class="service-char">特征值数量: {{item.characteristics.length}}</text>
-      </view>
-    </view>
-
     <!-- 文件管理 -->
-    <view wx:if="{{connected && notifyEnabled}}" class="file-mgr">
-      <view class="section-title">
-        <text>文件管理</text>
-        <text class="toggle-btn" bindtap="requestFileList">{{loadingFiles ? '刷新中...' : '刷新'}}</text>
+    <view wx:if="{{connected && notifyEnabled}}" class="card">
+      <view class="card-head">
+        <text class="card-title">设备上的图片</text>
+        <text class="chip-btn" bindtap="requestFileList">{{loadingFiles ? '刷新中…' : '刷新'}}</text>
       </view>
 
       <!-- 加载中 -->
       <view wx:if="{{loadingFiles}}" class="file-loading">
         <view class="loading"></view>
-        <text>加载文件列表...</text>
+        <text>加载中…</text>
       </view>
 
       <!-- 空状态 -->
       <view wx:elif="{{fileTotal === 0}}" class="file-empty">
-        <text>暂无图片文件</text>
+        <text>还没有图片，去"图片处理"里传一张</text>
       </view>
 
       <!-- 文件列表：只渲染窗口内的行，滚到底再放出下一屏 -->
       <scroll-view wx:else scroll-y class="file-scroll"
                    bindscrolltolower="onFileListScrollToLower" lower-threshold="80">
         <view wx:for="{{visibleFiles}}" wx:key="stem" class="file-row">
-          <image wx:if="{{item.thumb}}" class="file-thumb" src="{{item.thumb}}" mode="aspectFit" />
+          <image wx:if="{{item.thumb}}" class="file-thumb" src="{{item.thumb}}" mode="aspectFill" />
           <view wx:else class="file-thumb file-thumb-empty"></view>
           <view class="file-info">
-            <text class="file-id">{{item.label}}</text>
+            <text class="file-label">{{item.label}}</text>
             <text class="file-size">{{item.size}}</text>
           </view>
           <view class="file-actions">
-            <button class="file-btn file-btn-show" bindtap="selectImage" data-stem="{{item.stem}}">显示</button>
-            <button class="file-btn file-btn-del" bindtap="deleteImage" data-stem="{{item.stem}}">删除</button>
+            <view class="chip-btn chip-primary" bindtap="selectImage" data-stem="{{item.stem}}">显示</view>
+            <view class="chip-btn chip-danger" bindtap="deleteImage" data-stem="{{item.stem}}">删除</view>
           </view>
         </view>
         <view wx:if="{{renderedCount < fileTotal}}" class="file-more">
-          <text>已显示 {{renderedCount}}/{{fileTotal}}，上滑加载更多</text>
+          <text>已显示 {{renderedCount}} / {{fileTotal}}，上滑加载更多</text>
         </view>
       </scroll-view>
     </view>
 
     <!-- 轮播设置 -->
-    <view wx:if="{{connected && notifyEnabled}}" class="slideshow-panel">
-      <view class="section-title">
-        <text>轮播设置</text>
+    <view wx:if="{{connected && notifyEnabled}}" class="card">
+      <view class="card-head">
+        <text class="card-title">自动轮播</text>
+        <switch class="card-switch" checked="{{slideshowEnabled}}" bindchange="onSlideshowToggle" />
       </view>
       <view class="slideshow-row">
-        <text class="slideshow-label">启用轮播</text>
-        <switch checked="{{slideshowEnabled}}" bindchange="onSlideshowToggle" />
+        <text class="slideshow-label">间隔</text>
+        <text class="slideshow-value">{{slideshowInterval}} 秒</text>
       </view>
       <view class="slideshow-row">
-        <text class="slideshow-label">间隔时间: {{slideshowInterval}}秒</text>
-      </view>
-      <view class="slideshow-row">
-        <text class="slideshow-value">10s</text>
+        <text class="slideshow-bound">10s</text>
         <slider class="slideshow-slider" min="10" max="300" step="5" value="{{slideshowInterval}}" bindchange="onSlideshowIntervalChange" />
-        <text class="slideshow-value">300s</text>
+        <text class="slideshow-bound">300s</text>
       </view>
     </view>
   </view>
@@ -134,7 +132,7 @@
   <!-- 图片处理面板 -->
   <view class="tab-content" wx:if="{{currentTab === 1}}">
     <!-- 选择图片 -->
-    <view class="image-section">
+    <view class="card image-section">
       <button class="btn-choose" bindtap="chooseImage">
         <text>{{imageSrc ? '重新选择图片' : '选择图片'}}</text>
       </button>
@@ -143,17 +141,17 @@
       <view class="crop-size-selector" wx:if="{{imageSrc}}">
         <view class="size-option {{cropWidth === 800 ? 'active' : ''}}" bindtap="selectCropSize" data-size="800">
           <text class="size-name">横屏</text>
-          <text class="size-value">800x480</text>
+          <text class="size-value">800×480</text>
         </view>
         <view class="size-option {{cropWidth === 480 ? 'active' : ''}}" bindtap="selectCropSize" data-size="480">
           <text class="size-name">竖屏</text>
-          <text class="size-value">480x800</text>
+          <text class="size-value">480×800</text>
         </view>
       </view>
 
       <!-- 裁剪按钮 -->
       <button class="btn-crop" wx:if="{{imageSrc}}" bindtap="cropImage">
-        <text>裁剪图片 ({{cropWidth}}x{{cropHeight}})</text>
+        <text>裁剪 ({{cropWidth}}×{{cropHeight}})</text>
       </button>
 
       <!-- 原图预览 -->
@@ -164,10 +162,10 @@
     </view>
 
     <!-- 抖动算法选择 -->
-    <view class="dither-section" wx:if="{{imageSrc}}">
-      <view class="section-title">
-        <text>抖动算法</text>
-        <text class="toggle-btn" bindtap="toggleEnhancePanel">{{showEnhance ? '收起参数' : '调整参数'}}</text>
+    <view class="card dither-section" wx:if="{{imageSrc}}">
+      <view class="card-head">
+        <text class="card-title">抖动算法</text>
+        <text class="chip-btn" bindtap="toggleEnhancePanel">{{showEnhance ? '收起参数' : '调整参数'}}</text>
       </view>
 
       <view class="algorithm-list">
@@ -184,7 +182,7 @@
       </view>
 
       <!-- 增强参数面板 -->
-      <view class="enhance-panel {{showEnhance ? 'show' : ''}}" wx:if="{{showEnhance}}">
+      <view class="enhance-panel" wx:if="{{showEnhance}}">
         <view class="param-row">
           <text class="param-label">亮度 {{enhanceParams.brightness}}</text>
           <slider class="param-slider" min="0.5" max="1.5" step="0.05" value="{{enhanceParams.brightness}}" data-key="brightness" bindchange="onParamChange" />
@@ -206,12 +204,12 @@
 
       <!-- 处理按钮 -->
       <button class="btn-process" bindtap="processImage" loading="{{processing}}" disabled="{{processing}}">
-        {{processing ? '处理中...' : '应用抖动算法'}}
+        {{processing ? '处理中…' : '应用抖动算法'}}
       </button>
 
       <!-- 处理结果 -->
       <view class="result-box" wx:if="{{processedSrc}}">
-        <text class="preview-label">处理结果 (7色墨水屏)</text>
+        <text class="preview-label">处理结果 · 7 色墨水屏</text>
         <image class="preview-img" src="{{processedSrc}}" mode="aspectFit" />
         <view class="result-actions">
           <button class="btn-action" bindtap="saveImage">保存图片</button>
@@ -222,21 +220,6 @@
         <view wx:if="{{sending}}" class="progress-bar">
           <view class="progress-fill" style="width: {{sendProgress}}%"></view>
           <text class="progress-text">{{sendProgress}}%</text>
-        </view>
-      </view>
-    </view>
-
-    <!-- 调色板展示 -->
-    <view class="palette-section">
-      <text class="section-title">调色板颜色统计</text>
-      <view class="palette-stats">
-        <view class="palette-stat-item" wx:for="{{colorStats}}" wx:key="code">
-          <view class="color-preview" style="background: {{item.color}}"></view>
-          <text class="color-name">{{item.name}}</text>
-          <text class="color-percent">{{item.percent}}%</text>
-        </view>
-        <view class="palette-stat-item" wx:if="{{colorStats.length === 0}}">
-          <text class="color-hint">处理图片后显示颜色统计</text>
         </view>
       </view>
     </view>

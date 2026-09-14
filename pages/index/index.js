@@ -6,6 +6,11 @@ const EPD_IMAGE_WIDTH = 800
 const EPD_IMAGE_HEIGHT = 480
 const EPD_IMAGE_BYTES = EPD_IMAGE_WIDTH * EPD_IMAGE_HEIGHT
 
+// 扫描时只认广播名带这个前缀的设备（固件用 BLE_DEVICE_NAME = "EINK-xxxx"）
+const DEVICE_NAME_PREFIX = 'EINK-'
+// 名字没解析出来时的兜底：墨水屏服务的 16 位 UUID 是 0xABF0
+const BLE_SERVICE_HINT = 'ABF0'
+
 // 图片身份就是文件名 stem：YYYYMMDD-HHMMSS-NNN，19 字符。
 // 设备没有时钟，所以时间必须由手机提供；定宽格式让字典序等于时间序。
 const STEM_LENGTH = 19
@@ -25,9 +30,15 @@ const FILE_LIST_TIMEOUT_MS = 4000
 const FILE_WINDOW_STEP = 50
 // 翻页上限，防止设备异常时无限请求
 const MAX_LIST_PAGES = 200
+// 单页记录数上限：设备每页最多 16 条，超过说明头部被解析成了垃圾
+const MAX_LIST_RECORDS = 1024
 const THUMB_PREFIX = 'thumb_'
 // 缩略图批量合并 setData 的条数
 const THUMB_BATCH_SIZE = 10
+// 轮播设置：合并短时间内的多次改动，并在设备报忙时重试
+const SLIDESHOW_DEBOUNCE_MS = 400
+const SLIDESHOW_RETRY_MS = 500
+const SLIDESHOW_MAX_RETRIES = 3
 const MAX_PREVIEW_STEPS = 500
 const MAX_PREVIEW_BUSY_RETRIES = 40
 
@@ -39,7 +50,6 @@ Page({
     devices: [],
     connected: false,
     currentDeviceId: '',
-    services: [],
     adapterAvailable: false,
 
     // 标签页
@@ -68,7 +78,6 @@ Page({
       { id: 'noise', name: '噪声抖动', desc: '随机噪点' }
     ],
     processedBinary: null, // 存储二进制数据用于发送
-    colorStats: [], // 颜色统计
     cropWidth: 800, // 裁剪宽度
     cropHeight: 480, // 裁剪高度
     // BLE 文件传输
@@ -211,35 +220,27 @@ Page({
     if (this._deviceFoundListenerRegistered) return
     this._deviceFoundListenerRegistered = true
     wx.onBluetoothDeviceFound((res) => {
-      const newDevices = res.devices.map(device => {
-        // 尝试从多个位置获取设备名称
-        let name = device.name || device.localName
+      const newDevices = res.devices
+        .filter(device => this.isTargetDevice(device))
+        .map(device => {
+          let name = device.name || device.localName || ''
 
-        // 如果名称仍为空，尝试从广播数据中提取
-        if (!name && device.advertisData) {
-          const adv = device.advertisData
-          // 尝试常见的 localName 字段
-          name = adv.localName || adv.kCBAdvDataLocalName || adv.deviceName
-
-          // 尝试从广播数据中解析（某些设备名称在 Service UUID 中）
-          if (!name && adv.serviceUuids) {
-            name = 'BLE设备'
+          if (!name && device.advertisData) {
+            const adv = device.advertisData
+            name = adv.localName || adv.kCBAdvDataLocalName || adv.deviceName || ''
           }
-        }
+          if (!name) {
+            const id = device.deviceId || ''
+            name = DEVICE_NAME_PREFIX + id.substring(id.length - 4, id.length)
+          }
 
-        // 如果还是没有名称，显示部分设备ID
-        if (!name) {
-          const id = device.deviceId || ''
-          name = '设备_' + id.substring(id.length - 6, id.length)
-        }
-
-        return {
-          deviceId: device.deviceId,
-          name: name,
-          RSSI: device.RSSI,
-          advertisData: device.advertisData
-        }
-      })
+          return {
+            deviceId: device.deviceId,
+            name: name,
+            RSSI: device.RSSI,
+            signal: this.signalLevel(device.RSSI)
+          }
+        })
 
       const devices = this.data.devices
       newDevices.forEach(newDevice => {
@@ -295,31 +296,24 @@ Page({
         this.setData({
           connected: false,
           currentDeviceId: '',
-          services: []
         })
         wx.showToast({ title: '连接已断开', icon: 'none' })
       }
     })
   },
 
+  /* Service discovery is only here to locate the write characteristic — the
+   * full list is not something the UI needs. */
   getServices(deviceId) {
     wx.getBLEDeviceServices({
       deviceId: deviceId,
       success: (res) => {
         console.log('获取服务成功', res)
-        const services = []
         let completedCount = 0
         const totalServices = res.services.length
 
         res.services.forEach((service) => {
-          const serviceInfo = {
-            uuid: service.uuid,
-            isPrimary: service.isPrimary,
-            characteristics: []
-          }
-          this.getCharacteristics(deviceId, service.uuid, serviceInfo, (charResult) => {
-            serviceInfo.characteristics = charResult
-            services.push(serviceInfo)
+          this.getCharacteristics(deviceId, service.uuid, (charResult) => {
             completedCount++
 
             // 查找目标特征值 (0xABF0 服务 + 0xABF1 特征值)
@@ -341,7 +335,6 @@ Page({
             }
 
             if (completedCount === totalServices) {
-              this.setData({ services })
               // 服务发现完后再协商 MTU（此时才能成功）
               this.negotiateMTU(deviceId)
             }
@@ -402,10 +395,10 @@ Page({
             const status = buf[1] & 0x0F
             console.log('ACK: cmd=' + ackCmd + ' status=' + status)
 
-            const waiter = this._ackWaiter
-            if (waiter && waiter.commandNibble === ackCmd) {
+            const waiter = this._ackWaiters ? this._ackWaiters[ackCmd] : null
+            if (waiter) {
               clearTimeout(waiter.timer)
-              this._ackWaiter = null
+              delete this._ackWaiters[ackCmd]
               waiter.resolve({
                 responded: true,
                 ok: status === 0,
@@ -420,7 +413,7 @@ Page({
 
           // 文件列表（0x10）：首片开启一个会话
           if (buf.length >= 2 && buf[0] === 0x10) {
-            this.beginFileList(Array.from(buf))
+            this.beginFileList(buf)
             return
           }
 
@@ -485,7 +478,7 @@ Page({
     })
   },
 
-  getCharacteristics(deviceId, serviceId, serviceInfo, callback) {
+  getCharacteristics(deviceId, serviceId, callback) {
     wx.getBLEDeviceCharacteristics({
       deviceId: deviceId,
       serviceId: serviceId,
@@ -512,7 +505,6 @@ Page({
         this.setData({
           connected: false,
           currentDeviceId: '',
-          services: []
         })
         wx.showToast({ title: '已断开连接', icon: 'success' })
       }
@@ -548,8 +540,7 @@ Page({
         this._rawPixels = null  // invalidate cache for new image
         this.setData({
           imageSrc: imagePath,
-          processedSrc: '',
-          colorStats: []
+          processedSrc: ''
         })
         // Pre-rasterize so processImage() can skip image loading
         this.rasterizeSource(imagePath)
@@ -669,6 +660,11 @@ Page({
       img.onerror = reject
       img.src = imagePath
     })
+
+    // 源图可能带透明像素（裁剪页缩放后会留白），先铺白底：
+    // 透明区域取出来是 RGB(0,0,0)，抖动后会变成黑块。
+    ctx.fillStyle = '#ffffff'
+    ctx.fillRect(0, 0, targetWidth, targetHeight)
     ctx.drawImage(img, cropX, cropY, cropWidth, cropHeight,
                   0, 0, targetWidth, targetHeight)
 
@@ -755,7 +751,6 @@ Page({
       }
 
       const binary = colorCodesToBinary(finalColorCodes)
-      const colorStats = this.analyzeColorStats(finalColorCodes)
 
       // 预览图必须从转置后的 finalColorCodes 生成：processedSrc 是转置前的，
       // 用它做缩略图会让竖屏图片和墨水屏上显示的差 90°。
@@ -772,7 +767,6 @@ Page({
       this.processedBinary = binary
       this.setData({
         processedSrc,
-        colorStats,
         processing: false
       })
 
@@ -1152,6 +1146,8 @@ Page({
       return
     }
 
+    this.armListTimeout('文件列表第 ' + this._listPages + ' 页')
+
     const cmd = new Uint8Array(1 + STEM_FIELD)
     cmd[0] = 0x10
     cmd.set(this.writeStemField(this._listCursor), 1)
@@ -1267,22 +1263,43 @@ Page({
    * 首片进入会话，后续分片由 appendFileList 无条件追加——分片首字节是
    * 任意字节，不能再按 0x10 判断，否则除首片外全被丢弃。
    */
+  /**
+   * 超时从**发出请求**那一刻开始算，而不是等第一个分片到达。
+   * 否则设备对某一页完全不应答时（丢包、忙、重启），既没有分片也就没有
+   * 计时器，loadingFiles 会永远停在 true —— 界面看起来就是卡死。
+   */
+  armListTimeout(reason) {
+    if (this._fileListTimer) {
+      clearTimeout(this._fileListTimer)
+    }
+    this._fileListTimer = setTimeout(() => {
+      this._fileListTimer = null
+      this.abortFileList(reason + '超时（已收到 ' + this._fileListLength + ' 字节）')
+    }, FILE_LIST_TIMEOUT_MS)
+  },
+
+  resetFileListBuffer() {
+    this._fileListBuffer = null
+    this._fileListLength = 0
+  },
+
   beginFileList(bytes) {
-    this.clearFileList()
+    // 不动定时器：它是按"发请求"计的，分片到达只是让它继续跑
+    this.resetFileListBuffer()
 
     let capacity = bytes.length
     if (bytes.length >= FILE_LIST_HEADER_SIZE) {
       const count = bytes[3] | (bytes[4] << 8)
+      if (count > MAX_LIST_RECORDS) {
+        this.abortFileList('设备返回的记录数异常 (' + count + ')')
+        return
+      }
       capacity = Math.max(FILE_LIST_HEADER_SIZE + count * FILE_LIST_RECORD_SIZE,
                           bytes.length)
     }
     this._fileListBuffer = new Uint8Array(capacity)
     this._fileListBuffer.set(bytes, 0)
     this._fileListLength = bytes.length
-
-    this._fileListTimer = setTimeout(() => {
-      this.abortFileList('文件列表接收超时（已收到 ' + this._fileListLength + ' 字节）')
-    }, FILE_LIST_TIMEOUT_MS)
 
     this.tryFinishFileList()
   },
@@ -1310,28 +1327,37 @@ Page({
     if (this._fileListLength < expected) return
 
     let lastStem = ''
-    for (let i = 0; i < count; i++) {
-      const off = FILE_LIST_HEADER_SIZE + i * FILE_LIST_RECORD_SIZE
-      const stem = this.readStemField(buf, off)
-      if (!stem) continue
-      const rawSize = (buf[off + STEM_FIELD] | (buf[off + STEM_FIELD + 1] << 8) |
-                       (buf[off + STEM_FIELD + 2] << 16) |
-                       (buf[off + STEM_FIELD + 3] << 24)) >>> 0
-      const previewSize = (buf[off + STEM_FIELD + 4] |
-                           (buf[off + STEM_FIELD + 5] << 8) |
-                           (buf[off + STEM_FIELD + 6] << 16) |
-                           (buf[off + STEM_FIELD + 7] << 24)) >>> 0
-      lastStem = stem
-      this._allFiles.push({
-        stem,
-        label: this.stemToLabel(stem),
-        size: this.formatFileSize(rawSize),
-        previewSize,
-        thumb: ''
-      })
+    try {
+      for (let i = 0; i < count; i++) {
+        const off = FILE_LIST_HEADER_SIZE + i * FILE_LIST_RECORD_SIZE
+        const stem = this.readStemField(buf, off)
+        if (!stem) continue
+        const rawSize = (buf[off + STEM_FIELD] | (buf[off + STEM_FIELD + 1] << 8) |
+                         (buf[off + STEM_FIELD + 2] << 16) |
+                         (buf[off + STEM_FIELD + 3] << 24)) >>> 0
+        const previewSize = (buf[off + STEM_FIELD + 4] |
+                             (buf[off + STEM_FIELD + 5] << 8) |
+                             (buf[off + STEM_FIELD + 6] << 16) |
+                             (buf[off + STEM_FIELD + 7] << 24)) >>> 0
+        lastStem = stem
+        this._allFiles.push({
+          stem,
+          label: this.stemToLabel(stem),
+          size: this.formatFileSize(rawSize),
+          previewSize,
+          thumb: ''
+        })
+      }
+    } catch (e) {
+      console.error('文件列表解析异常:', e)
+      this.abortFileList('解析失败: ' + (e.message || e))
+      return
     }
 
-    this.clearFileList()
+    console.log('文件列表第 ' + this._listPages + ' 页: total=' + this._listTotal +
+                ' count=' + count + ' 已收=' + this._allFiles.length)
+
+    this.resetFileListBuffer()
 
     // 用最后一条的名字当游标继续翻页：total 每页头部都有，翻到收满为止
     if (count > 0 && lastStem &&
@@ -1342,6 +1368,7 @@ Page({
       return
     }
 
+    this.clearFileList()
     this.finishFileList()
   },
 
@@ -1406,7 +1433,7 @@ Page({
     this.clearFileList()
     this._previewPending = null
     this._previewProgress = 0
-    this._ackWaiter = null
+    this._ackWaiters = {}
     this._thumbGeneration = (this._thumbGeneration || 0) + 1
     if (this.data.loadingFiles || this.data.sending) {
       this.setData({ loadingFiles: false, sending: false })
@@ -1652,17 +1679,25 @@ Page({
    * id 只在 FILE_START 的 4 字节 ACK 里有效。
    */
   waitForAck(commandNibble, timeoutMs) {
+    if (!this._ackWaiters) this._ackWaiters = {}
+    const pending = this._ackWaiters[commandNibble]
+    if (pending) {
+      // 同一个命令重复等待：旧的直接判为无应答，不要把它悬在那里
+      clearTimeout(pending.timer)
+      pending.resolve({ responded: false, ok: false, status: -1, stem: '' })
+    }
+
     return new Promise((resolve) => {
-      this._ackWaiter = {
-        commandNibble,
+      const waiter = {
         resolve,
         timer: setTimeout(() => {
-          if (this._ackWaiter && this._ackWaiter.commandNibble === commandNibble) {
-            this._ackWaiter = null
-            resolve({ responded: false, ok: false, status: -1, id: 0 })
+          if (this._ackWaiters[commandNibble] === waiter) {
+            delete this._ackWaiters[commandNibble]
+            resolve({ responded: false, ok: false, status: -1, stem: '' })
           }
         }, timeoutMs)
       }
+      this._ackWaiters[commandNibble] = waiter
     })
   },
 
@@ -1684,6 +1719,29 @@ Page({
    */
   waitForFileEndAck(timeoutMs = 8000) {
     return this.waitForAck(0x03, timeoutMs)
+  },
+
+  /**
+   * 扫描会返回附近所有 BLE 设备，这里只保留本项目的墨水屏：优先按广播名
+   * 前缀匹配；名字没解析出来时退回服务 UUID，避免因广播解析差异漏掉设备。
+   */
+  isTargetDevice(device) {
+    const name = (device.name || device.localName || '').toUpperCase()
+    if (name.indexOf(DEVICE_NAME_PREFIX) === 0) {
+      return true
+    }
+
+    const uuids = device.advertisServiceUUIDs || []
+    return uuids.some(uuid =>
+      String(uuid).toUpperCase().indexOf(BLE_SERVICE_HINT) !== -1)
+  },
+
+  /** 把 RSSI 分成三档，用于给出信号强弱的颜色提示。 */
+  signalLevel(rssi) {
+    if (typeof rssi !== 'number') return 'weak'
+    if (rssi >= -60) return 'strong'
+    if (rssi >= -80) return 'medium'
+    return 'weak'
   },
 
   /**
@@ -1779,13 +1837,32 @@ Page({
   /**
    * 发送轮播配置 (CMD_SLIDESHOW_CTRL = 0x13)
    */
-  sendSlideshowConfig(enabled, interval) {
+  /**
+   * 合并短时间内的多次改动再下发。
+   *
+   * 开关连点、滑杆拖动会产生一串事件，而设备对同一条命令有 1 秒限流，
+   * 逐条发送会让中间那些被静默丢弃 —— 界面显示的和设备实际执行的就分叉了。
+   * 用户要的只是最后那个值。
+   */
+  queueSlideshowConfig() {
+    if (this._slideshowTimer) {
+      clearTimeout(this._slideshowTimer)
+    }
+    this._slideshowTimer = setTimeout(() => {
+      this._slideshowTimer = null
+      this.sendSlideshowConfig(this.data.slideshowEnabled,
+                               this.data.slideshowInterval)
+    }, SLIDESHOW_DEBOUNCE_MS)
+  },
+
+  sendSlideshowConfig(enabled, interval, attempt) {
     if (!this.data.connected) return
     const deviceId = this.data.currentDeviceId
     const serviceId = this.data.writeServiceId
     const charId = this.data.writeCharacteristicId
     if (!serviceId || !charId) return
 
+    const tryNumber = attempt || 0
     const cmd = new Uint8Array(4)
     cmd[0] = 0x13
     cmd[1] = enabled ? 1 : 0
@@ -1793,11 +1870,34 @@ Page({
     cmd[3] = (interval >> 8) & 0xFF
     const ab = cmd.buffer.slice(cmd.byteOffset, cmd.byteOffset + cmd.byteLength)
 
+    // 必须等应答：被限流时设备回 status=2 并丢弃这条命令，
+    // 不看应答的话界面会停在一个设备并不认的值上。
+    const ackPromise = this.waitForAck(0x03, 3000)
+
     wx.writeBLECharacteristicValue({
       deviceId, serviceId, characteristicId: charId,
       value: ab,
-      success: () => console.log('SLIDESHOW_CTRL 已发送: enabled=' + enabled + ' interval=' + interval),
+      success: () => console.log('SLIDESHOW_CTRL 已发送: enabled=' + enabled +
+                                 ' interval=' + interval + ' 第' + (tryNumber + 1) + '次'),
       fail: (err) => console.error('SLIDESHOW_CTRL 发送失败:', err)
+    })
+
+    ackPromise.then((ack) => {
+      if (!ack.responded || ack.ok) return
+      if (ack.status !== 2) {
+        console.warn('设备拒绝了轮播设置 (status=' + ack.status + ')')
+        return
+      }
+      // 忙 = 被限流。只在用户没有再改动的前提下重试，避免把过期值补发回去
+      const stillCurrent = this.data.slideshowEnabled === enabled &&
+                           this.data.slideshowInterval === interval
+      if (tryNumber < SLIDESHOW_MAX_RETRIES && stillCurrent) {
+        setTimeout(() => {
+          this.sendSlideshowConfig(enabled, interval, tryNumber + 1)
+        }, SLIDESHOW_RETRY_MS)
+      } else {
+        console.warn('轮播设置未能下发: enabled=' + enabled + ' interval=' + interval)
+      }
     })
   },
 
@@ -1805,51 +1905,19 @@ Page({
    * 轮播开关切换
    */
   onSlideshowToggle(e) {
-    const enabled = e.detail.value
-    this.setData({ slideshowEnabled: enabled })
-    this.sendSlideshowConfig(enabled, this.data.slideshowInterval)
+    this.setData({ slideshowEnabled: e.detail.value })
+    this.queueSlideshowConfig()
   },
 
   /**
    * 轮播间隔变化
    */
   onSlideshowIntervalChange(e) {
-    const interval = parseInt(e.detail.value)
-    this.setData({ slideshowInterval: interval })
-    this.sendSlideshowConfig(this.data.slideshowEnabled, interval)
+    this.setData({ slideshowInterval: parseInt(e.detail.value) })
+    this.queueSlideshowConfig()
   },
 
   sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms))
-  },
-
-  /**
-   * 分析颜色统计
-   */
-  analyzeColorStats(colorCodes) {
-    const stats = {}
-    const colorNames = {
-      0x00: { name: '黑色', color: '#000000' },
-      0xFF: { name: '白色', color: '#FFFFFF' },
-      0xFC: { name: '黄色', color: '#FFFF00' },
-      0xE0: { name: '红色', color: '#FF0000' },
-      0x03: { name: '蓝色', color: '#0000FF' },
-      0x1C: { name: '绿色', color: '#00FF00' }
-    }
-
-    for (let y = 0; y < colorCodes.length; y++) {
-      for (let x = 0; x < (colorCodes[y]?.length ?? 0); x++) {
-        const code = colorCodes[y][x]
-        stats[code] = (stats[code] || 0) + 1
-      }
-    }
-
-    const total = colorCodes.length * (colorCodes[0]?.length ?? 1)
-    return Object.entries(stats).map(([code, count]) => ({
-      code: parseInt(code),
-      ...colorNames[code],
-      count,
-      percent: (count / total * 100).toFixed(1)
-    })).sort((a, b) => b.count - a.count)
   }
 })
