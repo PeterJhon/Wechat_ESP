@@ -80,6 +80,45 @@
   border-radius: 8rpx;
 }
 
+/* 缩放面板 */
+.zoom-panel {
+  padding: 20rpx 24rpx 8rpx;
+  background: #2a2a2a;
+}
+
+.zoom-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 4rpx;
+}
+
+.zoom-label {
+  font-size: 26rpx;
+  color: #fff;
+}
+
+.zoom-value {
+  font-size: 23rpx;
+  color: #07c160;
+}
+
+.zoom-row {
+  display: flex;
+  align-items: center;
+  gap: 12rpx;
+}
+
+.zoom-bound {
+  font-size: 20rpx;
+  color: #888;
+}
+
+.zoom-slider {
+  flex: 1;
+  margin: 0 6rpx;
+}
+
 .tips {
   padding: 20rpx;
   text-align: center;
@@ -112,6 +151,6 @@
 }
 
 .btn-confirm {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: #07c160;
   color: #fff;
 }

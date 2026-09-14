@@ -30,9 +30,25 @@
     ></canvas>
   </view>
 
+  <!-- 缩放：缩小可把整张图放进取景框，放大则只取局部 -->
+  <view class="zoom-panel">
+    <view class="zoom-head">
+      <text class="zoom-label">缩放</text>
+      <text class="zoom-value">{{zoom}}%{{zoom === zoomMin ? ' · 完整显示' : ''}}</text>
+    </view>
+    <view class="zoom-row">
+      <text class="zoom-bound">完整</text>
+      <slider class="zoom-slider"
+              min="{{zoomMin}}" max="{{zoomMax}}" step="1" value="{{zoom}}"
+              activeColor="#07c160" block-size="20"
+              bindchanging="onZoomChange" bindchange="onZoomChange" />
+      <text class="zoom-bound">放大</text>
+    </view>
+  </view>
+
   <!-- 提示信息 -->
   <view class="tips">
-    <text class="tip-text">提示：拖动调整裁剪区域</text>
+    <text class="tip-text">拖动取景框调整位置{{zoom === zoomMin ? '，当前整张图都在框内' : ''}}</text>
   </view>
 
   <!-- 操作按钮 -->
