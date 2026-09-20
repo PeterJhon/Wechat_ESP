@@ -1,7 +1,12 @@
 {
   "description": "蓝牙文件传输小程序",
   "packOptions": {
-    "ignore": [],
+    "ignore": [
+      {
+        "type": "folder",
+        "value": "tools"
+      }
+    ],
     "include": []
   },
   "setting": {
