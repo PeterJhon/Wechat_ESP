@@ -7,13 +7,11 @@
 
   <!-- 尺寸选择 -->
   <view class="size-selector">
-    <view class="size-option {{cropWidth === 800 && cropHeight === 480 ? 'active' : ''}}" bindtap="selectSize" data-w="800" data-h="480">
-      <text class="size-name">横屏</text>
-      <text class="size-value">800x480</text>
-    </view>
-    <view class="size-option {{cropWidth === 480 && cropHeight === 800 ? 'active' : ''}}" bindtap="selectSize" data-w="480" data-h="800">
-      <text class="size-name">竖屏</text>
-      <text class="size-value">480x800</text>
+    <view wx:for="{{sizeOptions}}" wx:key="label"
+          class="size-option {{cropWidth === item.w && cropHeight === item.h ? 'active' : ''}}"
+          bindtap="selectSize" data-w="{{item.w}}" data-h="{{item.h}}">
+      <text class="size-name">{{item.label}}</text>
+      <text class="size-value">{{item.w}}x{{item.h}}</text>
     </view>
   </view>
 

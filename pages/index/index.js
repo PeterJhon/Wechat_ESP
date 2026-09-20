@@ -1,10 +1,7 @@
 // pages/index/index.js
 import { convertToEPD, colorCodesToBinary, colorCodesToImageData } from '../../utils/epd-converter.js'
-
-// 设备只接受恰好 800×480 的整图（一个像素一个调色板码）
-const EPD_IMAGE_WIDTH = 800
-const EPD_IMAGE_HEIGHT = 480
-const EPD_IMAGE_BYTES = EPD_IMAGE_WIDTH * EPD_IMAGE_HEIGHT
+import { PANEL_PROFILES, DEFAULT_PANEL_TAG, parsePanel, cropOptionsFor, panelBytes } from '../../utils/panel.js'
+import { packToWire } from '../../utils/epd-wire.js'
 
 // 扫描时只认广播名带这个前缀的设备（固件用 BLE_DEVICE_NAME = "EINK-xxxx"）
 const DEVICE_NAME_PREFIX = 'EINK-'
@@ -39,13 +36,25 @@ const THUMB_BATCH_SIZE = 10
 const SLIDESHOW_DEBOUNCE_MS = 400
 const SLIDESHOW_RETRY_MS = 500
 const SLIDESHOW_MAX_RETRIES = 3
-// 实时预览：缩小到这个宽度跑抖动。整图是 384000 像素的逐点运算，
-// 要几百毫秒，跟不上滑杆拖动；缩小图约 1/11 的像素量，几十毫秒。
+// 实时预览：缩小到这个宽度跑抖动，拖动滑杆时才有几十毫秒的反馈。
+// 这是绝对宽度，面板越大占整图的比例越小（800 上约 1/11，1200 上约 1/25），
+// 而抖动是尺度相关的，所以预览与最终结果不会逐像素一致 —— 参数定下来后
+// 由 scheduleSharpPreview 自动补一版全分辨率把它收敛回来。
 const PREVIEW_DITHER_WIDTH = 240
+// 松手后隔多久补全分辨率。太短会在连续点按时反复排队，太长则松手后
+// 要干等一截预览才变清晰。
+const SHARP_PREVIEW_DEBOUNCE_MS = 260
 // 连续渲染之间的最小间隔，避免拖动时把 JS 线程占满
 const LIVE_PREVIEW_INTERVAL_MS = 120
 const MAX_PREVIEW_STEPS = 500
 const MAX_PREVIEW_BUSY_RETRIES = 40
+
+// 每个数据块之后的间隔。设备侧已把 SD 写从 BLE 接收路径上摘下来
+// （环形缓冲 + 独立写卡任务），射频不再需要被压着走，所以这里是 0。
+// 真机若出现丢包（FILE_END 报字节数不足），先把它调回 10 试。
+const SEND_CHUNK_DELAY_MS = 0
+// 选图被限流（status=2）后的重试间隔。设备侧的窗口是 1 秒，取略大一点。
+const SELECT_RETRY_MS = 1100
 
 Page({
   data: {
@@ -64,6 +73,8 @@ Page({
     imageSrc: '',
     processedSrc: '',
     processing: false,
+    // 正在补全分辨率：预览此刻还是缩小图，界面上要说一声
+    sharpening: false,
     showEnhance: false,
     selectedAlgo: 'hybrid',
     enhanceParams: {
@@ -83,8 +94,13 @@ Page({
       { id: 'noise', name: '噪声抖动', desc: '随机噪点' }
     ],
     processedBinary: null, // 存储二进制数据用于发送
-    cropWidth: 800, // 裁剪宽度
-    cropHeight: 480, // 裁剪高度
+    // 面板参数在连接后由广播名里的标识确定，这里先铺默认值
+    panelTag: DEFAULT_PANEL_TAG,
+    panelLabel: PANEL_PROFILES[DEFAULT_PANEL_TAG].label,
+    cropOptions: cropOptionsFor(PANEL_PROFILES[DEFAULT_PANEL_TAG]),
+    cropWidth: PANEL_PROFILES[DEFAULT_PANEL_TAG].width,
+    cropHeight: PANEL_PROFILES[DEFAULT_PANEL_TAG].height,
+
     // BLE 文件传输
     writeServiceId: '',       // 0xABF0 服务 ID
     writeCharacteristicId: '', // 0xABF1 特征值 ID
@@ -118,8 +134,25 @@ Page({
   },
 
   onLoad() {
+    this._panel = parsePanel('')
     this.checkBluetooth()
     this._lastImageSrc = ''
+  },
+
+  /** 连接上以后按设备广播名确定面板，并让裁剪选项跟着变。 */
+  applyPanelFromName(name) {
+    const panel = parsePanel(name)
+    const first = cropOptionsFor(panel)[0]
+    this._panel = panel
+    this.setData({
+      panelTag: panel.tag,
+      panelLabel: panel.label,
+      cropOptions: cropOptionsFor(panel),
+      cropWidth: first.w,
+      cropHeight: first.h
+    })
+    console.log('面板：' + panel.label + '（标识 ' + panel.tag +
+                '），图像 ' + (panel.width * panel.height) + ' 字节')
   },
 
   onShow() {
@@ -138,6 +171,10 @@ Page({
   },
 
   onUnload() {
+    if (this._sharpTimer) {
+      clearTimeout(this._sharpTimer)
+      this._sharpTimer = null
+    }
     this.closeBluetooth()
   },
 
@@ -291,6 +328,7 @@ Page({
       timeout: 10000,
       success: () => {
         console.log('连接成功', device.deviceId)
+        this.applyPanelFromName(device.name)
         this.setData({ connected: true, currentDeviceId: device.deviceId })
         wx.hideLoading()
         wx.showToast({ title: '连接成功', icon: 'success' })
@@ -577,12 +615,10 @@ Page({
    * 选择裁剪尺寸
    */
   selectCropSize(e) {
-    const size = parseInt(e.currentTarget.dataset.size)
-    if (size === 800) {
-      this.setData({ cropWidth: 800, cropHeight: 480 })
-    } else {
-      this.setData({ cropWidth: 480, cropHeight: 800 })
-    }
+    this.setData({
+      cropWidth: parseInt(e.currentTarget.dataset.w),
+      cropHeight: parseInt(e.currentTarget.dataset.h)
+    })
   },
 
   /**
@@ -590,7 +626,9 @@ Page({
    */
   cropImage() {
     wx.navigateTo({
-      url: `/pages/crop/crop?imagePath=${encodeURIComponent(this.data.imageSrc)}&cropWidth=${this.data.cropWidth}&cropHeight=${this.data.cropHeight}`
+      url: `/pages/crop/crop?imagePath=${encodeURIComponent(this.data.imageSrc)}` +
+           `&cropWidth=${this.data.cropWidth}&cropHeight=${this.data.cropHeight}` +
+           `&panelW=${this._panel.width}&panelH=${this._panel.height}`
     })
   },
 
@@ -602,6 +640,7 @@ Page({
       selectedAlgo: e.currentTarget.dataset.id
     })
     this.scheduleLivePreview()
+    this.scheduleSharpPreview()
   },
 
   /**
@@ -623,6 +662,11 @@ Page({
       [`enhanceParams.${key}`]: value
     })
     this.scheduleLivePreview()
+    // 拖动中只跑缩小图；手指离开滑杆那次（bindchange，e.type 不是 changing）
+    // 参数才算定下来，这时补一版全分辨率，预览会自己变清晰。
+    if (e.type !== 'changing') {
+      this.scheduleSharpPreview()
+    }
   },
 
   /**
@@ -639,6 +683,7 @@ Page({
       }
     })
     this.scheduleLivePreview()
+    this.scheduleSharpPreview()
     wx.showToast({ title: '参数已重置', icon: 'none' })
   },
 
@@ -646,21 +691,26 @@ Page({
    * 处理图片
    */
   /**
-   * 把任意源图栅格化成墨水屏要求的尺寸。
+   * 把任意源图栅格化成当前面板要求的尺寸。
    *
-   * 设备只接受恰好 800×480 的图（384000 字节），而源图什么比例都有：
-   * 只按长边缩放会让 16:9 的照片停在 800×450（360000 字节），设备直接
-   * 拒收且不刷新。这里按目标比例居中裁切再缩放，横向出 800×480、纵向出
-   * 480×800（纵向随后会被转置），两者最终都是 384000 字节。
+   * 设备只接受恰好一个栅格的整图（800×480 是 384000 字节，1200×1600 是
+   * 1920000 字节），而源图什么比例都有：只按长边缩放会让 16:9 的照片停在
+   * 800×450（360000 字节），设备直接拒收且不刷新。这里按目标比例居中裁切
+   * 再缩放，栅格与文件布局不符时随后会被转置，字节数因此始终不变。
    */
   async rasterizeToPanel(imagePath) {
     const imgInfo = await new Promise((resolve, reject) => {
       wx.getImageInfo({ src: imagePath, success: resolve, fail: reject })
     })
 
-    const portrait = imgInfo.height > imgInfo.width
-    const targetWidth = portrait ? 480 : 800
-    const targetHeight = portrait ? 800 : 480
+    /* 面板的两种合法栅格是 宽×高（文件布局）与 高×宽。这里取与源图方向一致
+     * 的那一个；方向若与文件布局不符，由后面的转置环节负责摆正。 */
+    const panel = this._panel
+    const fileIsLandscape = panel.width > panel.height
+    const sourceIsPortrait = imgInfo.height > imgInfo.width
+    const useRotated = sourceIsPortrait === fileIsLandscape
+    const targetWidth = useRotated ? panel.height : panel.width
+    const targetHeight = useRotated ? panel.width : panel.height
 
     const targetAspect = targetWidth / targetHeight
     const sourceAspect = imgInfo.width / imgInfo.height
@@ -720,6 +770,7 @@ Page({
       console.log('Source rasterized to panel size: ' + raster.width + 'x' + raster.height)
       // 选完图立刻给一版实时预览，不用再点按钮
       this.scheduleLivePreview()
+      this.scheduleSharpPreview()
     } catch (e) {
       console.error('Rasterize failed:', e)
       this._rawPixels = null
@@ -759,9 +810,10 @@ Page({
    * 按当前算法与参数渲染。
    *
    * fullScale=false 时在缩小图上跑抖动，供滑杆拖动时实时预览：整图是
-   * 384000 像素的逐点运算，要几百毫秒，挂在 bindchanging 上跟不上；缩小图
-   * 约 1/11 的像素量，几十毫秒就够。代价是抖动与尺度相关，预览和最终结果
-   * 不会逐像素一致 —— 效果看得出，但要发给设备仍以全分辨率那次为准。
+   * 1920000 像素（1200 面板）的逐点运算，要一两秒，挂在 bindchanging 上
+   * 跟不上；缩小图几十毫秒就够。代价是抖动与尺度相关，预览和最终结果不会
+   * 逐像素一致 —— 所以松手后由 scheduleSharpPreview 自动补一版全分辨率，
+   * 发给设备的也仍以那一次为准。
    */
   async renderDither(fullScale) {
     if (!this.data.imageSrc) return false
@@ -805,9 +857,13 @@ Page({
     })
     const processedData = colorCodesToImageData(colorCodes, renderWidth, renderHeight)
 
-    // 竖屏图片发给设备前要转置
+    // 栅格方向与文件布局不一致时转置。800×480 的文件是横的（竖图要转），
+    // 1200×1600 的文件是竖的（横图反而要转）—— 所以不能只判"是不是竖图"。
+    const fileIsLandscape = this._panel.width > this._panel.height
+    const rasterIsLandscape = (colorCodes[0] || []).length > colorCodes.length
+
     let finalColorCodes = colorCodes
-    if (colorCodes.length > (colorCodes[0] || []).length) {
+    if (rasterIsLandscape !== fileIsLandscape) {
       const h = colorCodes.length
       const w = colorCodes[0].length
       const transposed = []
@@ -868,6 +924,43 @@ Page({
     this._liveBusy = false
     if (this._livePending) {
       setTimeout(() => this.runLivePreview(), LIVE_PREVIEW_INTERVAL_MS)
+    } else if (this._sharpAfterLive) {
+      // 精确预览刚才让过路，实时预览停了就补上
+      this._sharpAfterLive = false
+      this.runSharpPreview()
+    }
+  },
+
+  /**
+   * 参数定下来后补一版全分辨率渲染。
+   *
+   * 拖动中跑的是缩小图抖动（见 PREVIEW_DITHER_WIDTH），与整图结果不会逐像素
+   * 一致，面板越大差得越多。这里在松手后自动收敛到真正会发出去的样子，
+   * 不必先点一次上传才知道效果。
+   */
+  scheduleSharpPreview() {
+    if (!this.data.imageSrc) return
+    if (this._sharpTimer) clearTimeout(this._sharpTimer)
+    this._sharpTimer = setTimeout(() => {
+      this._sharpTimer = null
+      this.runSharpPreview()
+    }, SHARP_PREVIEW_DEBOUNCE_MS)
+  },
+
+  async runSharpPreview() {
+    // 实时预览在跑就让路，它收尾时会回来叫（见 runLivePreview）
+    if (this._liveBusy) {
+      this._sharpAfterLive = true
+      return
+    }
+    this._sharpAfterLive = false
+    this.setData({ sharpening: true })
+    try {
+      await this.renderDither(true)
+    } catch (e) {
+      console.error('精确预览失败:', e)
+    } finally {
+      this.setData({ sharpening: false })
     }
   },
 
@@ -1042,16 +1135,23 @@ Page({
 
     // 设备会静默丢弃尺寸不符的整张图，只回一个非零 FILE_END 状态，
     // 所以在这里就拦住，别让用户白等一整轮传输。
-    if (binary.length !== EPD_IMAGE_BYTES) {
+    const panel = this._panel
+    const expectedBytes = panelBytes(panel)
+    if (binary.length !== expectedBytes) {
       wx.showModal({
         title: '图片尺寸不对',
-        content: '处理结果是 ' + binary.length + ' 字节，设备只接受 ' +
-                 EPD_IMAGE_BYTES + ' 字节（' + EPD_IMAGE_WIDTH + '×' +
-                 EPD_IMAGE_HEIGHT + '）。请重新处理图片。',
+        content: '处理结果是 ' + binary.length + ' 字节，该面板只接受 ' +
+                 expectedBytes + ' 字节（' + panel.width + '×' +
+                 panel.height + '）。请重新处理图片。',
         showCancel: false
       })
       return
     }
+
+    /* 线上走 3 bit/像素：1,920,000 → 720,000。设备侧解包后再落盘，
+     * 所以上面按 panelBytes() 校验的是磁盘格式、这里换的是线上格式，别混。
+     * 这一份同时把传输量砍到 1/2.67，是除了解耦之外最大的一笔。 */
+    const wire = packToWire(binary)
 
     this.setData({ sending: true, sendProgress: 0 })
 
@@ -1101,6 +1201,8 @@ Page({
       let offset = 0
       const total = bytes.length
       let lastProgress = -1
+      // 提到循环外：为 0 时连 Promise/setTimeout 都不必创建
+      const chunkDelay = SEND_CHUNK_DELAY_MS
       console.log(label + ': 开始发送数据, 总包数:', Math.ceil(total / CHUNK_DATA_SIZE))
 
       while (offset < total) {
@@ -1110,7 +1212,9 @@ Page({
         packet[0] = 0x02  // CMD_FILE_DATA
         packet.set(bytes.subarray(offset, offset + dataSize), 1)
         await writeChar(packet)
-        await this.sleep(10)  // Give NimBLE stack time to process
+        if (chunkDelay > 0) {
+          await this.sleep(chunkDelay)
+        }
 
         offset += dataSize
         if (reportProgress) {
@@ -1184,7 +1288,7 @@ Page({
                     (ack.responded ? '' : '（无应答，按旧固件处理）'))
 
         // Step 2: CMD_FILE_DATA + CMD_FILE_END
-        await streamBody(binary, '主图', true, true)
+        await streamBody(wire, '主图', true, true)
 
         // Step 3: 旁挂预览图（CMD_PREVIEW_START = 0x16）
         if (storedStem && previewBuffer) {
@@ -1346,6 +1450,22 @@ Page({
     const stem = e.currentTarget.dataset.stem
     if (!this.data.connected) return
 
+    /* 记住最后点的是哪一张：下面的重试只在它仍然是最新选择时才发，
+     * 否则一次迟到的重试会把用户后来选的图顶掉。 */
+    this._pendingSelect = stem
+    this.sendSelect(stem, 0)
+  },
+
+  /**
+   * 发送 FILE_SELECT，被限流时退避重试。
+   *
+   * 设备对会写卡的命令有「1 秒内不重复」的限流，超出的直接丢弃并回 status=2。
+   * 连续切图时后几次必然撞上它，而 README 约定客户端收到 2 应当退避重试 ——
+   * 不重试的话，用户看到的就是"点了没反应"。
+   */
+  sendSelect(stem, attempt) {
+    const MAX_SELECT_ATTEMPTS = 3
+
     const cmd = new Uint8Array(1 + STEM_FIELD)
     cmd[0] = 0x12
     cmd.set(this.writeStemField(stem), 1)
@@ -1370,6 +1490,14 @@ Page({
       if (!ack.responded) {
         wx.showToast({ title: '设备未应答', icon: 'none' })
       } else if (!ack.ok) {
+        if (ack.status === 2 && attempt < MAX_SELECT_ATTEMPTS &&
+            this._pendingSelect === stem) {
+          // 被限流丢弃。等过设备那 1 秒窗口再发一次 —— 中途改选别的图就放弃。
+          setTimeout(() => {
+            if (this._pendingSelect === stem) this.sendSelect(stem, attempt + 1)
+          }, SELECT_RETRY_MS)
+          return
+        }
         wx.showToast({ title: '设备拒绝了显示指令', icon: 'none' })
       } else {
         wx.showToast({ title: '已开始显示', icon: 'success' })

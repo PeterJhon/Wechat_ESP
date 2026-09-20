@@ -138,17 +138,17 @@
         <text>{{imageSrc ? '重新选择图片' : '选择图片'}}</text>
       </button>
 
-      <!-- 尺寸选择 -->
+      <!-- 尺寸选择：两个选项由面板决定 —— 800 那块是横屏/竖屏，
+           1200×1600 那块反过来是竖屏/横屏，所以只能按宽高判断 -->
       <view class="crop-size-selector" wx:if="{{imageSrc}}">
-        <view class="size-option {{cropWidth === 800 ? 'active' : ''}}" bindtap="selectCropSize" data-size="800">
-          <text class="size-name">横屏</text>
-          <text class="size-value">800×480</text>
-        </view>
-        <view class="size-option {{cropWidth === 480 ? 'active' : ''}}" bindtap="selectCropSize" data-size="480">
-          <text class="size-name">竖屏</text>
-          <text class="size-value">480×800</text>
+        <view wx:for="{{cropOptions}}" wx:key="label"
+              class="size-option {{cropWidth === item.w && cropHeight === item.h ? 'active' : ''}}"
+              bindtap="selectCropSize" data-w="{{item.w}}" data-h="{{item.h}}">
+          <text class="size-name">{{item.label}}</text>
+          <text class="size-value">{{item.w}}×{{item.h}}</text>
         </view>
       </view>
+      <text class="preset-hint" wx:if="{{imageSrc}}">当前面板：{{panelLabel}}</text>
 
       <!-- 裁剪按钮 -->
       <button class="btn-crop" wx:if="{{imageSrc}}" bindtap="cropImage">
@@ -209,7 +209,7 @@
 
       <!-- 处理结果：参数改了就实时更新，不需要再点应用 -->
       <view class="result-box" wx:if="{{processedSrc}}">
-        <text class="preview-label">处理结果 · 7 色墨水屏（实时预览）</text>
+        <text class="preview-label">处理结果 · {{panelLabel}}{{sharpening ? ' · 精确渲染中…' : ' · 实时预览'}}</text>
         <image class="preview-img" src="{{processedSrc}}" mode="aspectFit" />
         <view class="result-actions">
           <button class="btn-action" bindtap="saveImage">保存图片</button>

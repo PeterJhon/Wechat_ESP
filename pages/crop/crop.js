@@ -1,13 +1,16 @@
 // pages/crop/crop.js
+import { PANEL_PROFILES, DEFAULT_PANEL_TAG, cropOptionsFor } from '../../utils/panel.js'
 //
-// 取景框的尺寸固定为设备要求的比例（800×480 或 480×800），图片则在框内
+// 取景框的尺寸固定为面板要求的比例（宽×高 或 高×宽），图片则在框内
 // 可缩放：缩小可以把整张图放进框里（四周留白），放大可以只取局部。
 // 滑杆 100% 表示"图片刚好完整可见"，默认值是"刚好填满取景框"。
 Page({
   data: {
     imagePath: '',
-    cropWidth: 800,
-    cropHeight: 480,
+    cropWidth: PANEL_PROFILES[DEFAULT_PANEL_TAG].width,
+    cropHeight: PANEL_PROFILES[DEFAULT_PANEL_TAG].height,
+    // 尺寸选项由面板决定，onLoad 里按 URL 上的面板参数重算
+    sizeOptions: cropOptionsFor(PANEL_PROFILES[DEFAULT_PANEL_TAG]),
     imageWidth: 0,
     imageHeight: 0,
 
@@ -37,13 +40,27 @@ Page({
 
   onLoad(options) {
     const imagePath = decodeURIComponent(options.imagePath || '')
-    const cropWidth = parseInt(options.cropWidth) || 800
-    const cropHeight = parseInt(options.cropHeight) || 480
+
+    /* 尺寸选项由面板决定：800×480 那块是"横屏 800×480 / 竖屏 480×800"，
+     * 1200×1600 那块反过来是"竖屏 1200×1600 / 横屏 1600×1200"。 */
+    const fallback = PANEL_PROFILES[DEFAULT_PANEL_TAG]
+    const panel = {
+      width: parseInt(options.panelW) || fallback.width,
+      height: parseInt(options.panelH) || fallback.height
+    }
+
+    const cropWidth = parseInt(options.cropWidth) || panel.width
+    const cropHeight = parseInt(options.cropHeight) || panel.height
 
     console.log('接收到的图片路径:', imagePath)
     console.log('裁剪尺寸:', cropWidth, cropHeight)
 
-    this.setData({ imagePath, cropWidth, cropHeight })
+    this.setData({
+      imagePath,
+      cropWidth,
+      cropHeight,
+      sizeOptions: cropOptionsFor(panel)
+    })
 
     if (imagePath) {
       this.loadImage(imagePath)
