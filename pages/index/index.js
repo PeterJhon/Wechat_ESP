@@ -76,7 +76,8 @@ Page({
     // 正在补全分辨率：预览此刻还是缩小图，界面上要说一声
     sharpening: false,
     showEnhance: false,
-    selectedAlgo: 'hybrid',
+    // 算法随面板走（见 utils/panel.js）。连接后由 applyPanelFromName 更新。
+    selectedAlgo: PANEL_PROFILES[DEFAULT_PANEL_TAG].dither,
     enhanceParams: {
       brightness: 1.05,
       saturation: 1.35,
@@ -147,6 +148,8 @@ Page({
     this.setData({
       panelTag: panel.tag,
       panelLabel: panel.label,
+      // 两块屏的默认算法不同，连上之后才知道是哪块
+      selectedAlgo: panel.dither,
       cropOptions: cropOptionsFor(panel),
       cropWidth: first.w,
       cropHeight: first.h
