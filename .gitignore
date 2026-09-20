@@ -1,0 +1,11 @@
+# 参数对比工具的产出。每次运行都重新生成，且含上屏用的 .bin（每个 1.92 MB），
+# 不该进版本库。
+tools/_param_out/
+
+# 微信开发者工具本地配置（含机器相关路径与个人设置）
+project.private.config.json
+
+# 依赖与系统杂项
+node_modules/
+.DS_Store
+Thumbs.db
