@@ -57,6 +57,33 @@ export const DEFAULT_ENHANCE_PARAMS = {
  * @returns {number} 颜色代码
  */
 export function findClosestColor(color, blackPenalty = 0) {
+  const r = color[0]
+  const g = color[1]
+  const b = color[2]
+
+  /* blackPenalty 为 0 时（默认值，小程序也从未设过别的）可以直接比距离的
+   * 平方：两者都非负、开方单调，大小关系完全一致。这样每像素省掉 6 次
+   * Math.sqrt 与 18 次 Math.pow —— 1200×1600 抖动会调用 192 万次，是抖动
+   * 里占比可观的一块。
+   *
+   * 有惩罚值时距离要参与加法（只加在黑上），平方不再等价，退回原路径。 */
+  if (blackPenalty === 0) {
+    let minDist = Infinity
+    let codeOut = 0x00
+    for (let i = 0; i < PALETTE_CODES.length; i++) {
+      const rgb = PALETTE_COLORS[i]
+      const dr = rgb[0] - r
+      const dg = rgb[1] - g
+      const db = rgb[2] - b
+      const dist = dr * dr + dg * dg + db * db
+      if (dist < minDist) {
+        minDist = dist
+        codeOut = PALETTE_CODES[i]
+      }
+    }
+    return codeOut
+  }
+
   let minDist = Infinity
   let codeOut = 0x00
 
@@ -64,9 +91,9 @@ export function findClosestColor(color, blackPenalty = 0) {
     const code = PALETTE_CODES[i]
     const rgb = PALETTE_COLORS[i]
     const dist = Math.sqrt(
-      Math.pow(rgb[0] - color[0], 2) +
-      Math.pow(rgb[1] - color[1], 2) +
-      Math.pow(rgb[2] - color[2], 2)
+      Math.pow(rgb[0] - r, 2) +
+      Math.pow(rgb[1] - g, 2) +
+      Math.pow(rgb[2] - b, 2)
     )
     const adjustedDist = code === 0x00 ? dist + blackPenalty : dist
     if (adjustedDist < minDist) {

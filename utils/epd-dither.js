@@ -412,6 +412,17 @@ export function noiseDither(imageData, blackPenalty = 0, noiseLevel = 0.5) {
 /**
  * Hybrid Block 抖动算法
  * 混合块抖动，根据亮度区域使用不同策略
+ *
+ * 已不再是任何面板的默认算法（见 utils/panel.js）。有两个原因，不要在没
+ * 实测的情况下把它改回默认：
+ *
+ * 1. **暗部选色有缺陷。** 亮度低于 brightThreshold 的块走"取最近的两色、
+ *    逐像素随机混合"。而中性灰到 红/绿/蓝 的距离完全相等，PALETTE_CODES
+ *    又因 JS 对类数字键按数值升序返回、把蓝排在红之前 —— 于是**所有中性
+ *    暗部都被判成「黑 + 蓝」**，阴影变成蓝色随机噪声，既糊又不够黑。
+ *    实测：本算法黑色占比 26%，同图 atkinson 46%、floyd 36%。
+ * 2. **非确定性。** 深色分支用 Math.random 打散，同一张图同样的参数每次
+ *    渲染结果都不同，用户无法复现自己满意的那一版。
  */
 export function hybridBlockDither(imageData, blackPenalty = 0, brightThreshold = 120, blockSize = 2) {
   const h = imageData.length
@@ -479,15 +490,28 @@ export function hybridBlockDither(imageData, blackPenalty = 0, brightThreshold =
           }
         }
       } else {
-        // 暗区域使用颜色混合
-        const distances = PALETTE_COLORS.map(rgb =>
-          Math.pow(rgb[0] - avgColor[0], 2) +
-          Math.pow(rgb[1] - avgColor[1], 2) +
-          Math.pow(rgb[2] - avgColor[2], 2)
-        )
-        const sorted = distances.map((d, i) => ({ d, i })).sort((a, b) => a.d - b.d)
-        const color1 = PALETTE_CODES[sorted[0].i]
-        const color2 = PALETTE_CODES[sorted[1].i]
+        /* 暗区域用两色混合：取最接近的两个调色板色，按打散的位置各占一半。
+         * 原来走 map + sort，还给每个颜色包一个 {d,i} 对象再排 —— 1200×1600
+         * 有 48 万个块，每块都建一批临时对象，光这部分就吃掉抖动耗时的一大块。
+         * 直接选最小与次小即可，结果与稳定排序一致（并列时都取索引小的）。 */
+        let best1 = 0
+        let best2 = 0
+        let d1 = Infinity
+        let d2 = Infinity
+        for (let i = 0; i < PALETTE_COLORS.length; i++) {
+          const rgb = PALETTE_COLORS[i]
+          const dr = rgb[0] - avgColor[0]
+          const dg = rgb[1] - avgColor[1]
+          const db = rgb[2] - avgColor[2]
+          const d = dr * dr + dg * dg + db * db
+          if (d < d1) {
+            d2 = d1; best2 = best1; d1 = d; best1 = i
+          } else if (d < d2) {
+            d2 = d; best2 = i
+          }
+        }
+        const color1 = PALETTE_CODES[best1]
+        const color2 = PALETTE_CODES[best2]
 
         const positions = []
         for (let i = 0; i < blockH * blockW; i++) positions.push(i)
@@ -514,15 +538,35 @@ export function hybridBlockDither(imageData, blackPenalty = 0, brightThreshold =
             oldPixel[2] - newPixel[2]
           ]
 
-          // 误差扩散
-          for (const [dx, dy] of [[1, 0], [2, 0], [-1, 1], [0, 1], [1, 1], [0, 2]]) {
-            const nx = x + bx + dx
-            const ny = y + by + dy
-            if (nx >= 0 && nx < w && ny >= 0 && ny < h) {
-              img[ny][nx][0] += error[0] / 8
-              img[ny][nx][1] += error[1] / 8
-              img[ny][nx][2] += error[2] / 8
+          /* 误差扩散（六个邻居权重都是 1/8）。原来每像素遍历一个字面量数组，
+           * 等于每像素新建 7 个数组再加解构迭代 —— 展开成显式判断，顺序与
+           * 原来一致，除法也只做一次。 */
+          const e0 = error[0] / 8
+          const e1 = error[1] / 8
+          const e2 = error[2] / 8
+          if (x + bx + 1 < w) {
+            const p = img[y + by][x + bx + 1]
+            p[0] += e0; p[1] += e1; p[2] += e2
+          }
+          if (x + bx + 2 < w) {
+            const p = img[y + by][x + bx + 2]
+            p[0] += e0; p[1] += e1; p[2] += e2
+          }
+          if (y + by + 1 < h) {
+            if (x + bx - 1 >= 0) {
+              const p = img[y + by + 1][x + bx - 1]
+              p[0] += e0; p[1] += e1; p[2] += e2
             }
+            const p = img[y + by + 1][x + bx]
+            p[0] += e0; p[1] += e1; p[2] += e2
+            if (x + bx + 1 < w) {
+              const q = img[y + by + 1][x + bx + 1]
+              q[0] += e0; q[1] += e1; q[2] += e2
+            }
+          }
+          if (y + by + 2 < h) {
+            const p = img[y + by + 2][x + bx]
+            p[0] += e0; p[1] += e1; p[2] += e2
           }
         }
       }
