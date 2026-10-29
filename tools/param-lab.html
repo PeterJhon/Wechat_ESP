@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>墨水屏调参台</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: #16171a; color: #e6e6e8;
+    font: 13px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  header {
+    padding: 10px 16px; background: #1e2024; border-bottom: 1px solid #2e3136;
+    display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  header .hint { color: #8b9099; font-size: 12px; }
+  header .hint b { color: #d8b45a; }
+  main { display: flex; gap: 16px; padding: 16px; align-items: flex-start; }
+  .panel { background: #1e2024; border: 1px solid #2e3136; border-radius: 8px; padding: 14px; }
+  #controls { width: 340px; flex: none; }
+  #view { flex: 1; min-width: 0; }
+
+  .drop {
+    border: 2px dashed #3a3e45; border-radius: 8px; padding: 22px; text-align: center;
+    color: #8b9099; cursor: pointer; transition: .15s; word-break: break-all;
+  }
+  .drop:hover, .drop.over { border-color: #07c160; color: #07c160; background: #07c16011; }
+
+  .row { margin: 9px 0; }
+  .row label { display: flex; justify-content: space-between; margin-bottom: 2px; }
+  .row label b { font-weight: 500; color: #cfd3d9; }
+  .row label output { color: #07c160; font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; accent-color: #07c160; }
+  select {
+    width: 100%; padding: 6px 8px; background: #26282c; color: #e6e6e8;
+    border: 1px solid #3a3e45; border-radius: 6px;
+  }
+  .btns { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+  button {
+    padding: 5px 10px; background: #26282c; color: #e6e6e8;
+    border: 1px solid #3a3e45; border-radius: 6px; cursor: pointer; font-size: 12px;
+  }
+  button:hover { border-color: #07c160; color: #07c160; }
+
+  #previewWrap { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+  canvas { background: #fff; border-radius: 6px; display: block; }
+  #preview { max-width: 100%; height: auto; }
+  /* 叠图对比：左半显示 A、右半显示 B，中间一条可拖的分界线 */
+  #dcmp { width: 520px; height: 520px; cursor: ew-resize; }
+  .btns button.on { border-color: #07c160; color: #07c160; }
+
+  .stat { color: #8b9099; font-size: 12px; margin-top: 8px; font-variant-numeric: tabular-nums; }
+  .stat b { color: #cfd3d9; font-weight: 500; }
+  #cfg {
+    width: 100%; height: 108px; margin-top: 8px; padding: 8px; resize: vertical;
+    background: #131417; color: #9fe6b8; border: 1px solid #2e3136; border-radius: 6px;
+    font: 12px/1.5 ui-monospace, Consolas, monospace;
+  }
+  body.busy #previewWrap { opacity: .6; }
+  .ble-box { margin-top: 14px; padding-top: 12px; border-top: 1px solid #2e3136; }
+  .ble-line { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .ble-line select { width: auto; flex: 1; min-width: 130px; }
+  #uploadBtn { background: #087a42; border-color: #0aa95c; }
+  #uploadBtn:disabled, button:disabled, select:disabled, input:disabled {
+    opacity: .45; cursor: not-allowed;
+  }
+  .progress { height: 8px; margin-top: 9px; background: #30343a; border-radius: 99px; overflow: hidden; }
+  .progress > div { height: 100%; width: 0; background: #07c160; transition: width .1s linear; }
+  #bleStatus.error { color: #f17c7c; }
+  #bleStatus.ok { color: #74d69b; }
+  #bleLog { white-space: pre-wrap; max-height: 92px; overflow: auto; }
+  body.uploading .drop { pointer-events: none; opacity: .5; }
+</style>
+</head>
+<body>
+<header>
+  <h1>墨水屏调参台</h1>
+  <span class="hint">
+    拖滑杆即看效果。用的是小程序里同一套 utils/epd-*.js —— 抖动图案与真机一致。
+    <b>颜色浓淡仍以屏上为准</b>（六种墨水的实际色值不等于 sRGB）。
+  </span>
+</header>
+
+<main>
+  <section id="controls" class="panel">
+    <div class="drop" id="drop">拖一张照片到这里，或点击选择</div>
+
+    <div class="row">
+      <label><b>面板</b></label>
+      <select id="panel"></select>
+    </div>
+    <div class="row">
+      <label><b>抖动算法</b></label>
+      <select id="algo"></select>
+    </div>
+
+    <div class="row">
+      <label><b>gamma</b><output id="o_gamma"></output></label>
+      <input type="range" id="gamma" min="0.5" max="1.6" step="0.01" value="0.85">
+    </div>
+    <div class="row">
+      <label><b>对比度</b><output id="o_contrast"></output></label>
+      <input type="range" id="contrast" min="0.7" max="1.8" step="0.01" value="1.1">
+    </div>
+    <div class="row">
+      <label><b>饱和度</b><output id="o_saturation"></output></label>
+      <input type="range" id="saturation" min="0.5" max="2.5" step="0.01" value="1.35">
+    </div>
+    <div class="row">
+      <label><b>亮度</b><output id="o_brightness"></output></label>
+      <input type="range" id="brightness" min="0.5" max="1.6" step="0.01" value="1.05">
+    </div>
+    <div class="row">
+      <label><b>暖色</b><output id="o_warmth"></output></label>
+      <input type="range" id="warmth" min="0.85" max="1.25" step="0.01" value="1.05">
+    </div>
+    <div class="row">
+      <label><b>黑色惩罚</b><output id="o_blackPenalty"></output></label>
+      <input type="range" id="blackPenalty" min="0" max="80" step="1" value="0">
+      <div class="stat" style="margin-top:2px">
+        给"黑色"的距离额外加这么多 —— <b>越大越少用黑</b>，暗部会更亮更柔，
+        但对比度下降。全部 12 个算法都吃这个参数。
+      </div>
+    </div>
+
+    <div class="btns">
+      <button data-preset="base">基准</button>
+      <button data-preset="soft">柔和</button>
+      <button data-preset="vivid">鲜艳</button>
+      <button data-preset="vividpunch">鲜+劲</button>
+      <button data-preset="bright">提暗部</button>
+    </div>
+
+    <div class="stat" id="stat">尚未载入图片</div>
+    <textarea id="cfg" readonly spellcheck="false"></textarea>
+
+    <div class="ble-box">
+      <div class="ble-line">
+        <button id="connectBtn">连接 ESP</button>
+        <button id="disconnectBtn" disabled>断开</button>
+        <select id="writeMode" title="自动失败时手工切兼容模式重试">
+          <option value="fast">自动 / 快速</option>
+          <option value="compat">兼容 20B（慢）</option>
+        </select>
+      </div>
+      <div class="ble-line" style="margin-top:8px">
+        <button id="uploadBtn" disabled>上传当前效果</button>
+      </div>
+      <div class="progress"><div id="progressFill"></div></div>
+      <div class="stat" id="bleStatus">未连接</div>
+      <div class="stat" id="bleLog"></div>
+    </div>
+  </section>
+
+  <section id="view" class="panel">
+    <div id="previewWrap">
+      <div>
+        <canvas id="preview"></canvas>
+        <div class="stat" id="sizeNote"></div>
+      </div>
+      <div>
+        <div class="btns" id="pairBtns">
+          <button data-pair="src:out" class="on">原图 ↔ 结果</button>
+          <button data-pair="src:enh">原图 ↔ 增强后</button>
+          <button data-pair="enh:out">增强后 ↔ 结果</button>
+        </div>
+        <canvas id="dcmp"></canvas>
+        <div class="stat">
+          1:1　<b>拖分界线</b>左右扫　·　鼠标在左边大图上移动可改变取景位置
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script type="module">
+import { convertToEPD, colorCodesToImageData,
+         colorCodesToBinary } from '../utils/epd-converter.js'
+import { enhanceToInternal, internalToImageData } from '../utils/epd-enhance.js'
+import { getDitherAlgorithmList } from '../utils/epd-dither.js'
+import { PANEL_PROFILES, DEFAULT_PANEL_TAG } from '../utils/panel.js'
+import { packToWire, wireBytes } from '../utils/epd-wire.js'
+import { ParamUploader, PREVIEW_MAX_BYTES } from './param-uploader.js'
+
+const $ = (id) => document.getElementById(id)
+// 增强参数（走 convertToEPD 的 params）。黑色惩罚不在这里 —— 它是 cfg 的
+// 字段、不是增强参数，单独绑。
+const SLIDERS = ['gamma', 'contrast', 'saturation', 'brightness', 'warmth']
+
+const DEFAULTS = { gamma: 0.85, contrast: 1.1, saturation: 1.35, brightness: 1.05, warmth: 1.05 }
+// 预设就是对比工具里那几组候选，方便一步跳到
+const PRESETS = {
+  base:       { ...DEFAULTS },
+  soft:       { gamma: 0.75, saturation: 1.50, contrast: 1.10, brightness: 1.05, warmth: 1.05 },
+  vivid:      { gamma: 0.75, saturation: 1.80, contrast: 1.10, brightness: 1.05, warmth: 1.05 },
+  vividpunch: { gamma: 0.75, saturation: 1.80, contrast: 1.35, brightness: 1.05, warmth: 1.05 },
+  bright:     { gamma: 0.65, saturation: 1.80, contrast: 1.35, brightness: 1.05, warmth: 1.05 },
+}
+
+let source = null                              // 已按面板尺寸裁切好的 ImageData
+let panel = PANEL_PROFILES[DEFAULT_PANEL_TAG]
+let lastFile = null
+let timer = null
+let detailAt = { x: 0.5, y: 0.5 }             // 取景中心（归一化）
+// 三层的全尺寸画布。叠图对比只是从它们裁，不重算像素
+let srcCanvas = null                          // 原图（已裁到面板尺寸）
+let enhCanvas = null                          // 增强后、未抖动
+let outCanvas = null                          // 抖动结果
+let pairA = 'src'                             // 分界线左边显示哪一层
+let pairB = 'out'                             // 右边显示哪一层
+let splitAt = 0.5                             // 分界线位置（归一化）
+let dragging = false
+let currentCodes = null                         // 当前全分辨率调色板码（上传快照来源）
+let renderRevision = 0
+let uploading = false
+
+// —— 两个下拉框 ——
+const panelSel = $('panel')
+for (const [tag, p] of Object.entries(PANEL_PROFILES)) {
+  panelSel.add(new Option(`${p.label}（文件 ${p.width}×${p.height}）`, tag))
+}
+panelSel.value = DEFAULT_PANEL_TAG
+
+const algoSel = $('algo')
+for (const a of getDitherAlgorithmList()) algoSel.add(new Option(a.name, a.id))
+algoSel.value = PANEL_PROFILES[DEFAULT_PANEL_TAG].dither || 'atkinson'
+
+/**
+ * 载图：等比缩放后居中裁切到面板尺寸。
+ * 与小程序 rasterizeToPanel() 同法，保证这里的取景与真机一致。
+ */
+function loadImage(img) {
+  const { width: W, height: H } = panel
+  const scale = Math.max(W / img.naturalWidth, H / img.naturalHeight)
+  const w = Math.max(1, Math.round(img.naturalWidth * scale))
+  const h = Math.max(1, Math.round(img.naturalHeight * scale))
+
+  const c = document.createElement('canvas')
+  c.width = W
+  c.height = H
+  const ctx = c.getContext('2d', { willReadFrequently: true })
+  ctx.fillStyle = '#fff'                      // 源图可能有透明区，先铺白
+  ctx.fillRect(0, 0, W, H)
+  ctx.drawImage(img, (W - w) / 2, (H - h) / 2, w, h)
+  source = ctx.getImageData(0, 0, W, H)
+  srcCanvas = c                               // 这张画布本身就是裁好的原图
+
+  $('sizeNote').textContent =
+    `面板 ${W}×${H}　源图 ${img.naturalWidth}×${img.naturalHeight}（居中裁切）`
+  schedule(0)
+}
+
+function pick(file) {
+  lastFile = file
+  const img = new Image()
+  img.onload = () => { $('drop').textContent = file.name; loadImage(img) }
+  img.src = URL.createObjectURL(file)
+}
+
+function readParams() {
+  const p = {}
+  for (const k of SLIDERS) p[k] = parseFloat($(k).value)
+  return p
+}
+
+// —— 渲染 ——
+function render() {
+  if (!source) return
+  const t0 = performance.now()
+  const params = readParams()
+  const codes = convertToEPD(source, {
+    dither: algoSel.value,
+    blackPenalty: parseFloat($('blackPenalty').value),
+    ...params
+  })
+  /* 上传必须拿完整调色板码，不从被 CSS 缩放的预览截图反推。render() 是同步的，
+   * 所以按钮点击时强制调用一次即可拿到最后一格滑杆对应的稳定快照。 */
+  currentCodes = codes
+  renderRevision++
+  const out = colorCodesToImageData(codes, source.width, source.height)
+  const ms = performance.now() - t0
+
+  const { width: W, height: H } = source
+  const c = $('preview')
+  c.width = W
+  c.height = H
+  c.getContext('2d').putImageData(new ImageData(out.data, W, H), 0, 0)
+
+  /* 增强后、未抖动那一格。这里单独再算一次 enhanceToInternal()，多花约
+   * 130ms —— 换来的是最终结果仍出自 convertToEPD() 那条**真实路径**，
+   * 不会因为图省事而在调参台里绕开它、导致预览与真机脱节。 */
+  const enh = internalToImageData(
+    enhanceToInternal(source.data, W, H, params), W, H)
+  if (!enhCanvas || enhCanvas.width !== W || enhCanvas.height !== H) {
+    enhCanvas = document.createElement('canvas')
+    enhCanvas.width = W
+    enhCanvas.height = H
+  }
+  enhCanvas.getContext('2d').putImageData(new ImageData(enh.data, W, H), 0, 0)
+
+  // 整幅结果留在 outCanvas 上，细节框以后直接从它裁（见 drawDetail）
+  if (!outCanvas || outCanvas.width !== W || outCanvas.height !== H) {
+    outCanvas = document.createElement('canvas')
+    outCanvas.width = W
+    outCanvas.height = H
+  }
+  outCanvas.getContext('2d').putImageData(new ImageData(out.data, W, H), 0, 0)
+  drawDetail()
+
+  // 墨色占比 —— 哪些墨根本没被用上一眼可见
+  const used = new Map()
+  for (let y = 0; y < H; y++) {
+    const row = codes[y]
+    for (let x = 0; x < W; x++) used.set(row[x], (used.get(row[x]) || 0) + 1)
+  }
+  const share = [...used.entries()].sort((a, b) => b[1] - a[1])
+    .map(([code, n]) => `${code.toString(16).padStart(2, '0')} ${(n / (W * H) * 100).toFixed(1)}%`)
+    .join('　')
+
+  $('stat').innerHTML =
+    `<b>${ms.toFixed(0)} ms</b>　${(W * H).toLocaleString()} 像素<br>${share}`
+  $('cfg').value = JSON.stringify({
+    dither: algoSel.value,
+    blackPenalty: parseFloat($('blackPenalty').value),
+    ...params
+  }, null, 2)
+  updateBleButtons()
+}
+
+/**
+ * 画 1:1 细节框。
+ *
+ * 只从三张全尺寸画布各裁一块，**绝不重跑抖动** —— 鼠标移动只是换取景位置，像素
+ * 一个都没变。早先这里错误地走了 schedule() → render()，等于鼠标每动一下
+ * 就把 192 万像素重算一遍，所以拖起来卡。
+ */
+function drawDetail() {
+  if (!outCanvas || !source) return
+  const layers = { src: srcCanvas, enh: enhCanvas, out: outCanvas }
+  const A = layers[pairA]
+  const B = layers[pairB]
+  if (!A || !B) return
+
+  const { width: W, height: H } = source
+  // 取景框不能超过画布任何一边 —— 800×480 那块高度只有 480，写死 520 会越界
+  const D = Math.min(520, W, H)
+  const sx = Math.max(0, Math.min(W - D, Math.round(detailAt.x * W - D / 2)))
+  const sy = Math.max(0, Math.min(H - D, Math.round(detailAt.y * H - D / 2)))
+
+  const c = $('dcmp')
+  if (c.width !== D) {                 // 只在尺寸变化时重设，重设会清空画布
+    c.width = D
+    c.height = D
+    c.style.width = D + 'px'
+    c.style.height = D + 'px'
+  }
+  const ctx = c.getContext('2d')
+  const cut = Math.max(1, Math.min(D - 1, Math.round(splitAt * D)))
+
+  // 左右各自从**同一个取景位置**裁同一块，只是在 cut 处切开 ——
+  // 这样分界线两侧永远是像素对像素对齐的，差异才看得出来。
+  ctx.drawImage(A, sx, sy, cut, D, 0, 0, cut, D)
+  ctx.drawImage(B, sx + cut, sy, D - cut, D, cut, 0, D - cut, D)
+
+  ctx.strokeStyle = '#07c160'
+  ctx.lineWidth = 2
+  ctx.beginPath()
+  ctx.moveTo(cut, 0)
+  ctx.lineTo(cut, D)
+  ctx.stroke()
+}
+
+/** 合并连续改动；渲染期间只记一次，避免拖滑杆时把主线程占满。 */
+function schedule(delay = 220) {
+  if (timer) clearTimeout(timer)
+  document.body.classList.add('busy')
+  timer = setTimeout(() => {
+    timer = null
+    render()
+    document.body.classList.remove('busy')
+  }, delay)
+}
+
+// —— 事件 ——
+$('drop').onclick = () => {
+  const f = document.createElement('input')
+  f.type = 'file'
+  f.accept = 'image/*'
+  f.onchange = () => f.files[0] && pick(f.files[0])
+  f.click()
+}
+for (const ev of ['dragover', 'dragenter']) {
+  $('drop').addEventListener(ev, (e) => {
+    e.preventDefault()
+    $('drop').classList.add('over')
+  })
+}
+for (const ev of ['dragleave', 'drop']) {
+  $('drop').addEventListener(ev, () => $('drop').classList.remove('over'))
+}
+$('drop').addEventListener('drop', (e) => {
+  e.preventDefault()
+  const f = e.dataTransfer.files[0]
+  if (f) pick(f)
+})
+
+panelSel.onchange = () => {
+  panel = PANEL_PROFILES[panelSel.value]
+  algoSel.value = panel.dither || algoSel.value   // 各面板的默认算法不同
+  if (lastFile) pick(lastFile)                    // 换面板要按新尺寸重新裁切
+  updateBleButtons()
+}
+
+algoSel.onchange = () => schedule(0)
+
+for (const k of SLIDERS) {
+  const el = $(k)
+  el.oninput = () => {
+    $(`o_${k}`).textContent = parseFloat(el.value).toFixed(2)
+    schedule()
+  }
+  $(`o_${k}`).textContent = parseFloat(el.value).toFixed(2)
+}
+
+// 黑色惩罚是整数刻度，单独绑
+{
+  const el = $('blackPenalty')
+  el.oninput = () => {
+    $('o_blackPenalty').textContent = parseFloat(el.value).toFixed(0)
+    schedule()
+  }
+  $('o_blackPenalty').textContent = parseFloat(el.value).toFixed(0)
+}
+
+for (const b of document.querySelectorAll('[data-preset]')) {
+  b.onclick = () => {
+    const p = PRESETS[b.dataset.preset]
+    for (const k of SLIDERS) {
+      $(k).value = p[k]
+      $(`o_${k}`).textContent = p[k].toFixed(2)
+    }
+    schedule(0)
+  }
+}
+
+$('preview').addEventListener('mousemove', (e) => {
+  if (!source || !outCanvas) return
+  const r = e.currentTarget.getBoundingClientRect()
+  detailAt = { x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height }
+  drawDetail()          // 只换取景位置，不重渲染
+})
+
+// —— 叠图对比：拖分界线 ——
+function setSplit(clientX) {
+  const r = $('dcmp').getBoundingClientRect()
+  splitAt = Math.max(0, Math.min(1, (clientX - r.left) / r.width))
+  drawDetail()
+}
+$('dcmp').addEventListener('mousedown', (e) => {
+  dragging = true
+  setSplit(e.clientX)
+  e.preventDefault()                    // 免得拖出文字选区
+})
+// 绑在 window 上：拖到画布外也不会断
+window.addEventListener('mousemove', (e) => { if (dragging) setSplit(e.clientX) })
+window.addEventListener('mouseup', () => { dragging = false })
+
+// —— 切换对比哪两层 ——
+for (const b of document.querySelectorAll('[data-pair]')) {
+  b.onclick = () => {
+    for (const o of document.querySelectorAll('[data-pair]')) {
+      o.classList.toggle('on', o === b)
+    }
+    ;[pairA, pairB] = b.dataset.pair.split(':')
+    drawDetail()
+  }
+}
+
+// ============================= Web Bluetooth =============================
+const ble = new ParamUploader({
+  onState: (state) => {
+    const el = $('bleStatus')
+    el.textContent = state.message
+    el.className = 'stat ' + (state.kind === 'error' ? 'error' :
+      ['connected', 'complete', 'partial'].includes(state.kind) ? 'ok' : '')
+    appendBleLog(state.message)
+    updateBleButtons()
+  },
+  onProgress: ({ label, sent, total, percent, packets, strategy }) => {
+    $('progressFill').style.width = Math.max(0, Math.min(100, percent)) + '%'
+    $('bleStatus').textContent =
+      `${label} ${Math.round(sent / 1024)} / ${Math.round(total / 1024)} KB` +
+      (packets ? `　${packets} 包　${strategy}` : '')
+  }
+})
+
+function appendBleLog(message) {
+  const el = $('bleLog')
+  const t = new Date().toLocaleTimeString()
+  el.textContent = `${t}　${message}\n` + el.textContent.split('\n').slice(0, 7).join('\n')
+}
+
+/** 上传期间锁定所有会改变快照的控件；断开始终可用。 */
+function setUploading(value) {
+  uploading = value
+  document.body.classList.toggle('uploading', value)
+  for (const el of document.querySelectorAll(
+    '#panel, #algo, #writeMode, input[type=range], [data-preset]')) {
+    el.disabled = value
+  }
+  updateBleButtons()
+}
+
+function updateBleButtons() {
+  const panelMatches = !ble.connected || ble.devicePanelTag === panelSel.value
+  $('connectBtn').disabled = uploading
+  $('disconnectBtn').disabled = !ble.connected
+  $('uploadBtn').disabled = !source || !currentCodes || !ble.connected ||
+    uploading || !panelMatches
+  if (ble.connected && !panelMatches && !uploading) {
+    $('bleStatus').className = 'stat error'
+    $('bleStatus').textContent =
+      `面板不匹配：页面 ${panelSel.value}，设备 ${ble.devicePanelTag}`
+  }
+}
+
+/** Canvas → JPEG Uint8Array。逐级收缩，直到满足固件 128KB 上限。 */
+async function buildPreviewJpeg() {
+  if (!outCanvas) return null
+  const attempts = [
+    [400, 0.75], [400, 0.65], [360, 0.65], [320, 0.55]
+  ]
+  for (const [width, quality] of attempts) {
+    const height = Math.max(1, Math.round(outCanvas.height * width / outCanvas.width))
+    const c = document.createElement('canvas')
+    c.width = width
+    c.height = height
+    c.getContext('2d').drawImage(outCanvas, 0, 0, width, height)
+    const blob = await new Promise(resolve => c.toBlob(resolve, 'image/jpeg', quality))
+    if (blob && blob.size > 0 && blob.size <= PREVIEW_MAX_BYTES) {
+      return new Uint8Array(await blob.arrayBuffer())
+    }
+  }
+  throw new Error('缩略图降质后仍超过 128KB')
+}
+
+$('connectBtn').onclick = async () => {
+  try {
+    await ble.connect(panelSel.value)
+  } catch (error) {
+    $('bleStatus').className = 'stat error'
+    $('bleStatus').textContent = error.message
+    appendBleLog(error.message)
+    updateBleButtons()
+  }
+}
+
+$('disconnectBtn').onclick = () => ble.disconnect()
+
+$('uploadBtn').onclick = async () => {
+  if (!source) return
+  setUploading(true)
+  $('progressFill').style.width = '0%'
+  try {
+    // 吃掉还没触发的防抖，并同步渲染最后一次滑杆位置。
+    if (timer) { clearTimeout(timer); timer = null }
+    render()
+    const revision = renderRevision
+
+    const disk = colorCodesToBinary(currentCodes)
+    const expectedPixels = panel.width * panel.height
+    if (disk.length !== expectedPixels) {
+      throw new Error(`像素数 ${disk.length}，应为 ${expectedPixels}`)
+    }
+    const wire = packToWire(disk)
+    const expectedWire = wireBytes(expectedPixels)
+    if (wire.length !== expectedWire) {
+      throw new Error(`线上大小 ${wire.length}，应为 ${expectedWire}`)
+    }
+
+    let preview = null
+    try {
+      preview = await buildPreviewJpeg()
+      appendBleLog(`缩略图 ${(preview.length / 1024).toFixed(1)} KB`)
+    } catch (error) {
+      // 主图仍可传；upload() 会在 preview 为空时跳过旁挂图。
+      appendBleLog(`缩略图跳过：${error.message}`)
+    }
+
+    if (revision !== renderRevision) throw new Error('渲染结果在上传前发生变化')
+    const result = await ble.upload({
+      panelTag: panelSel.value,
+      wireBytes: wire,
+      previewBytes: preview,
+      mode: $('writeMode').value
+    })
+    if (result.partialSuccess) {
+      appendBleLog(`主图已成功，缩略图失败：${result.previewError.message}`)
+    }
+  } catch (error) {
+    $('bleStatus').className = 'stat error'
+    $('bleStatus').textContent = error.message
+    appendBleLog(error.message)
+  } finally {
+    setUploading(false)
+  }
+}
+
+// 无 Web Bluetooth 时一进页面就说明，不让用户猜按钮为什么没反应。
+if (!ble.supported) {
+  $('bleStatus').className = 'stat error'
+  $('bleStatus').textContent =
+    '当前浏览器不支持 Web Bluetooth；请用 Edge/Chrome，通过 http://127.0.0.1 打开'
+}
+updateBleButtons()
+</script>
+</body>
+</html>

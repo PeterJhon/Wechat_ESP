@@ -7,5 +7,7 @@ project.private.config.json
 
 # 依赖与系统杂项
 node_modules/
+__pycache__/
+*.pyc
 .DS_Store
 Thumbs.db

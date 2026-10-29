@@ -1,0 +1,5 @@
+# param-compare.py 渲染需要
+Pillow>=10.0
+
+# param_upload.py 经蓝牙上传需要；只渲染对比图可以先不装
+bleak>=0.22
