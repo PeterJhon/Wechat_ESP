@@ -1176,7 +1176,7 @@ Page({
       wx.showToast({ title: '未找到目标特征值(0xABF1)', icon: 'none' })
       return
     }
-    if (this.data.sending) {
+    if (this.data.sending || this._deletePending) {
       wx.showToast({ title: '正在发送中...', icon: 'none' })
       return
     }
@@ -1187,6 +1187,12 @@ Page({
       return
     }
 
+    const session = this._sessionGeneration || 0
+    const assertSession = () => {
+      if ((this._sessionGeneration || 0) !== session || !this.data.connected) {
+        throw new Error("Bluetooth session ended; reconnect and retry")
+      }
+    }
     const deviceId = this.data.currentDeviceId
     const serviceId = this.data.writeServiceId
     const charId = this.data.writeCharacteristicId
@@ -1227,6 +1233,7 @@ Page({
 
     // 写入特征值
     const writeChar = (arr) => {
+      assertSession()
       return new Promise((resolve, reject) => {
         const ab = toArrayBuffer(arr)
         console.log('BLE写入 ' + arr.length + 'B:', Array.from(arr.slice(0, 8)))
@@ -1290,15 +1297,17 @@ Page({
         }
       }
 
-      // CMD_FILE_END —— 必须等应答。设备只有在收满 384000 字节后才会回
+      // CMD_FILE_END —— 必须等应答。设备只有在收满该面板的压缩数据后才会回
       // status=0；不等应答的话，丢包造成的失败和小程序报的“发送完成”
       // 完全无法区分，用户只会看到屏幕不动。
       console.log(label + ': 发送 CMD_FILE_END')
       const endAckPromise = this.waitForFileEndAck()
       await writeChar(new Uint8Array([0x03]))
       const endAck = await endAckPromise
+      assertSession()
 
       if (!endAck.responded) {
+        if (requireEndAck) throw new Error("FILE_END acknowledgement timed out; upload unconfirmed")
         console.warn(label + ': 未收到 FILE_END 应答')
       } else if (!endAck.ok) {
         const reason = label + '被设备拒收（状态 ' + endAck.status +
@@ -1338,6 +1347,8 @@ Page({
         await writeChar(startPacket)
 
         const ack = await ackPromise
+        assertSession()
+        if (!ack.responded) throw new Error("FILE_START acknowledgement timed out")
         if (ack.responded && !ack.ok) {
           // 状态 2 通常是重名，换一个序号再试
           throw new Error(ack.status === 2
@@ -1371,11 +1382,15 @@ Page({
         // 列表需要刷新才能看到新图
         setTimeout(() => this.requestFileList(), 300)
 
+        assertSession()
         this.setData({ sending: false, sendProgress: 100 })
         wx.hideToast()
         wx.showToast({ title: '发送完成!', icon: 'success' })
         console.log('=== 传输完成 ===')
       } catch (err) {
+        if ((this._sessionGeneration || 0) !== session) return
+        try { await writeChar(new Uint8Array([0x04])) } catch (_) {}
+        if ((this._sessionGeneration || 0) !== session) return
         console.error('发送失败:', JSON.stringify(err))
         this.setData({ sending: false })
         wx.hideToast()
@@ -1387,7 +1402,7 @@ Page({
       }
     }
 
-    sendWithProtocol()
+    return sendWithProtocol()
   },
 
   /**
@@ -1468,21 +1483,44 @@ Page({
         cmd.set(this.writeStemField(stem), 1)
         const ab = cmd.buffer.slice(cmd.byteOffset, cmd.byteOffset + cmd.byteLength)
 
+        // A successful BLE write only confirms delivery, not deletion.
+        if (this.data.sending || this.data.loadingFiles || this._deletePending) {
+          wx.showToast({ title: '请等待当前操作完成', icon: 'none' })
+          return
+        }
+        const session = this._sessionGeneration || 0
+        this._deletePending = true
+        const ackPromise = this.waitForAck(0x01, 8000)
         wx.writeBLECharacteristicValue({
           deviceId: this.data.currentDeviceId,
           serviceId: this.data.writeServiceId,
           characteristicId: this.data.writeCharacteristicId,
           value: ab,
-          success: () => {
-            console.log('DELETE 请求已发送: ' + stem)
-            wx.showToast({ title: '删除中...', icon: 'none' })
-            // 只把这一项从本地列表剔除，不再清空整表重新拉取：
-            // 那样会把滚动位置和整屏缩略图全部丢掉。
-            this.removeFileLocally(stem)
-            setTimeout(() => this.requestFileList(), 500)
+          success: async () => {
+            const ack = await ackPromise
+            this._deletePending = false
+            if ((this._sessionGeneration || 0) !== session || !this.data.connected) return
+            if (!ack.responded) {
+              wx.showToast({ title: '删除未获确认，请重试', icon: 'none' })
+            } else if (!ack.ok) {
+              wx.showToast({ title: ack.status === 2
+                ? '图片正在使用，请稍后重试' : '设备删除失败', icon: 'none' })
+            } else {
+              this.removeFileLocally(stem)
+              wx.showToast({ title: '已删除', icon: 'success' })
+            }
           },
-          fail: (err) => {
-            console.error('DELETE 发送失败:', err)
+          fail: () => {
+            const waiter = this._ackWaiters && this._ackWaiters[0x01]
+            if (waiter) {
+              clearTimeout(waiter.timer)
+              delete this._ackWaiters[0x01]
+              waiter.resolve({ responded: false, ok: false })
+            }
+            this._deletePending = false
+            if ((this._sessionGeneration || 0) === session) {
+              wx.showToast({ title: '删除请求发送失败', icon: 'none' })
+            }
           }
         })
       }
