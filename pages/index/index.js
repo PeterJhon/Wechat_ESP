@@ -53,6 +53,8 @@ const MAX_PREVIEW_BUSY_RETRIES = 40
 // （环形缓冲 + 独立写卡任务），射频不再需要被压着走，所以这里是 0。
 // 真机若出现丢包（FILE_END 报字节数不足），先把它调回 10 试。
 const SEND_CHUNK_DELAY_MS = 0
+const FAST_BURST_PACKETS = 16
+const FAST_BURST_PAUSE_MS = 4
 // 选图被限流（status=2）后的重试间隔。设备侧的窗口是 1 秒，取略大一点。
 const SELECT_RETRY_MS = 1100
 
@@ -439,8 +441,9 @@ Page({
               charResult.forEach(ch => {
                 const charUuidUpper = ch.uuid.toUpperCase()
                 if (charUuidUpper.indexOf('ABF1') !== -1 &&
-                    ch.properties && (ch.properties.write || ch.properties.writeNoResponse)) {
+                    ch.properties && ch.properties.write) {
                   console.log('找到目标特征值:', service.uuid, ch.uuid)
+                  this._writeNoResponseSupported = !!ch.properties.writeNoResponse
                   this.setData({
                     writeServiceId: service.uuid,
                     writeCharacteristicId: ch.uuid
@@ -511,6 +514,9 @@ Page({
           if (buf.length >= 2 && buf[0] === 0xFF) {
             const ackCmd = (buf[1] >> 4) & 0x0F
             const status = buf[1] & 0x0F
+            if (ackCmd === 0x02 && status !== 0 && this.data.sending) {
+              this._dataAckFailure = new Error("Device rejected image data (status " + status + ")")
+            }
             console.log('ACK: cmd=' + ackCmd + ' status=' + status)
 
             const waiter = this._ackWaiters ? this._ackWaiters[ackCmd] : null
@@ -1221,7 +1227,10 @@ Page({
      * 这一份同时把传输量砍到 1/2.67，是除了解耦之外最大的一笔。 */
     const wire = packToWire(binary)
 
+    this._dataAckFailure = null
     this.setData({ sending: true, sendProgress: 0 })
+    this._thumbGeneration = (this._thumbGeneration || 0) + 1
+    if (this._previewPending) this._previewPending.reject(new Error("Preview paused for upload"))
 
     // Uint8Array → ArrayBuffer（WeChat BLE API 需要 ArrayBuffer）
     const toArrayBuffer = (arr) => {
@@ -1232,16 +1241,15 @@ Page({
     }
 
     // 写入特征值
-    const writeChar = (arr) => {
+    const writeChar = (arr, withoutResponse = false) => {
       assertSession()
       return new Promise((resolve, reject) => {
         const ab = toArrayBuffer(arr)
-        console.log('BLE写入 ' + arr.length + 'B:', Array.from(arr.slice(0, 8)))
         wx.writeBLECharacteristicValue({
+          writeType: withoutResponse ? 'writeNoResponse' : 'write',
           deviceId, serviceId, characteristicId: charId,
           value: ab,
           success: () => {
-            console.log(' 写入成功')
             resolve()
           },
           fail: (err) => {
@@ -1263,11 +1271,13 @@ Page({
 
     // 分块大小 = MTU - 3(ATT头) - 1(命令字节) = MTU - 4
     // 默认 MTU=20 → 16字节数据/包；MTU=256 → 252字节数据/包（快16倍）
-    const CHUNK_DATA_SIZE = Math.max(16, this.data.mtu - 4)
+    const fastData = this._writeNoResponseSupported === true
+    const CHUNK_DATA_SIZE = Math.min(fastData ? 508 : 244, Math.max(16, (Number(this.data.mtu) || 23) - 4))
 
     // 主图和预览图共用同一套 DATA/END 流程
     const streamBody = async (bytes, label, reportProgress, requireEndAck) => {
       let offset = 0
+      let packetCount = 0
       const total = bytes.length
       let lastProgress = -1
       // 提到循环外：为 0 时连 Promise/setTimeout 都不必创建
@@ -1275,12 +1285,19 @@ Page({
       console.log(label + ': 开始发送数据, 总包数:', Math.ceil(total / CHUNK_DATA_SIZE))
 
       while (offset < total) {
+        if (this._dataAckFailure) throw this._dataAckFailure
         const remaining = total - offset
         const dataSize = Math.min(CHUNK_DATA_SIZE, remaining)
         const packet = new Uint8Array(1 + dataSize)
         packet[0] = 0x02  // CMD_FILE_DATA
         packet.set(bytes.subarray(offset, offset + dataSize), 1)
-        await writeChar(packet)
+        // Periodic answered DATA packets bound the queued burst; the final
+        // DATA packet is answered before FILE_END is sent.
+        packetCount++
+        const fence = packetCount % FAST_BURST_PACKETS === 0 || dataSize === remaining
+        await writeChar(packet, fastData && !fence)
+        if (fastData && fence && dataSize !== remaining) await this.sleep(FAST_BURST_PAUSE_MS)
+        if (this._dataAckFailure) throw this._dataAckFailure
         if (chunkDelay > 0) {
           await this.sleep(chunkDelay)
         }
@@ -1310,8 +1327,10 @@ Page({
         if (requireEndAck) throw new Error("FILE_END acknowledgement timed out; upload unconfirmed")
         console.warn(label + ': 未收到 FILE_END 应答')
       } else if (!endAck.ok) {
-        const reason = label + '被设备拒收（状态 ' + endAck.status +
-                       '）：通常是传输中途丢包，设备收到的字节数不足'
+        const reason = label + '被设备拒收（状态 ' + endAck.status + '）：' +
+          (endAck.status === 2
+            ? '接收数据长度不符，请重试；重复失败时检查设备接收字节数日志'
+            : '传输已中止或保存失败，请检查设备日志和 SD 卡')
         if (requireEndAck) {
           throw new Error(reason)
         }
@@ -1323,6 +1342,8 @@ Page({
 
     const sendWithProtocol = async () => {
       try {
+        if (this._thumbnailQueue) await this._thumbnailQueue
+        assertSession()
         console.log('=== 开始传输 ===')
         console.log('MTU:', this.data.mtu, '每包数据:', CHUNK_DATA_SIZE, 'B')
         console.log('文件名:', stem + '.bin', '数据大小:', binary.length, '字节')
@@ -1456,6 +1477,7 @@ Page({
     const ab = cmd.buffer.slice(cmd.byteOffset, cmd.byteOffset + cmd.byteLength)
 
     wx.writeBLECharacteristicValue({
+      writeType: 'write',
       deviceId: this.data.currentDeviceId,
       serviceId: this.data.writeServiceId,
       characteristicId: this.data.writeCharacteristicId,
@@ -1494,6 +1516,7 @@ Page({
         this._deletePending = true
         const ackPromise = this.waitForAck(0x01, 8000)
         wx.writeBLECharacteristicValue({
+          writeType: 'write',
           deviceId: this.data.currentDeviceId,
           serviceId: this.data.writeServiceId,
           characteristicId: this.data.writeCharacteristicId,
@@ -1578,6 +1601,7 @@ Page({
     const ackPromise = this.waitForAck(0x02, 3000)
 
     wx.writeBLECharacteristicValue({
+      writeType: 'write',
       deviceId: this.data.currentDeviceId,
       serviceId: this.data.writeServiceId,
       characteristicId: this.data.writeCharacteristicId,
@@ -1781,6 +1805,8 @@ Page({
   resetSessionState() {
     this._sessionGeneration = (this._sessionGeneration || 0) + 1
     this._deletePending = false
+    this._dataAckFailure = null
+    this._writeNoResponseSupported = false
     for (const waiter of Object.values(this._ackWaiters || {})) {
       clearTimeout(waiter.timer)
       waiter.resolve({ responded: false, ok: false, status: -1, stem: '' })
@@ -1800,6 +1826,7 @@ Page({
    * 缩略图缓存键就是文件名：stem 全局唯一且不会被复用，
    * 所以不需要再靠字节数之类的近似辨析符。
    */
+
   thumbPath(stem) {
     return `${wx.env.USER_DATA_PATH}/${THUMB_PREFIX}${stem}.jpg`
   },
@@ -1844,7 +1871,7 @@ Page({
 
   async loadThumbnailBatch(files, generation) {
     const current = () => generation === (this._thumbGeneration || 0) &&
-      this.data.connected && !this._bluetoothDisposed
+      this.data.connected && !this._bluetoothDisposed && !this.data.sending
     const targets = files.filter(f => f.previewSize > 0 && !f.thumb)
     const pending = []
 
@@ -1941,6 +1968,7 @@ Page({
       const ab = cmd.buffer.slice(cmd.byteOffset, cmd.byteOffset + cmd.byteLength)
       return new Promise((resolve, reject) => {
         wx.writeBLECharacteristicValue({
+          writeType: 'write',
           deviceId, serviceId, characteristicId, value: ab,
           success: resolve, fail: reject
         })
@@ -2204,6 +2232,7 @@ Page({
     const ab = cmd.buffer.slice(cmd.byteOffset, cmd.byteOffset + cmd.byteLength)
 
     wx.writeBLECharacteristicValue({
+      writeType: 'write',
       deviceId, serviceId, characteristicId: charId,
       value: ab,
       success: () => console.log('SLIDESHOW_STATE 请求已发送'),
@@ -2252,6 +2281,7 @@ Page({
     const ackPromise = this.waitForAck(0x03, 3000)
 
     wx.writeBLECharacteristicValue({
+      writeType: 'write',
       deviceId, serviceId, characteristicId: charId,
       value: ab,
       success: () => console.log('SLIDESHOW_CTRL 已发送: enabled=' + enabled +

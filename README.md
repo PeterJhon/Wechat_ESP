@@ -55,6 +55,11 @@ CLI 上传器检查设备面板、实际文件长度、应答和同名冲突，�
 node tools/panel.test.mjs
 node tools/epd-helper.test.mjs
 node tools/param-uploader.test.mjs
+node tools/bluetooth-init.test.mjs
+node tools/ble-session.test.mjs
+node tools/ble-delete.test.mjs
+node tools/ble-concurrency.test.mjs
+node tools/ble-reliability.test.mjs
 python tools/param_upload_test.py
 ```
 
