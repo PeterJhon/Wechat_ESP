@@ -30,3 +30,40 @@ services.at(-1).success(svc);chars.at(-1).success(characteristics);notifies.at(-
 // A page unload invalidates pending connect callbacks and closes the late physical link.
 p=page();p.connectDevice(event('D'));const d=connects.at(-1);p._bluetoothDisposed=true;p.resetSessionState();d.success();assert.equal(p.data.connected,false);assert(closed.some(x=>x.deviceId==='D'))
 console.log('PASS: out-of-order connects, stale discovery/notify/MTU callbacks, same-device reconnect, old notifications, delayed disconnect and unload cleanup')
+
+// Preparation failure always leaves an actionable disconnected state.
+for (const failure of ['services', 'empty', 'missing', 'notify', 'timeout']) {
+  p=page();p.connectDevice(event('E'));connects.at(-1).success()
+  const pendingServices=services.at(-1)
+  if(failure==='services') pendingServices.fail({errCode:10008})
+  if(failure==='empty') pendingServices.success({services:[]})
+  if(failure==='missing') {pendingServices.success(svc);chars.at(-1).success({characteristics:[]})}
+  if(failure==='notify') {pendingServices.success(svc);chars.at(-1).success(characteristics);notifies.at(-1).fail({})}
+  if(failure==='timeout') timers.findLast(x=>x.ms===15000).f()
+  assert.equal(p.data.connected,false,failure)
+  assert.equal(p.data.notifyEnabled,false,failure)
+  assert(p.data.connectionError,failure)
+  assert.equal(closed.at(-1).deviceId,'E')
+  const previous=notifies.length
+  pendingServices.success(svc)
+  assert.equal(notifies.length,previous,'late discovery after failure is ignored')
+  const beforeRetry=connects.length
+  p.retryConnection();assert.equal(connects.length,beforeRetry,'wait until old link is released')
+  closed.at(-1).complete()
+  p.retryConnection();assert.equal(connects.at(-1).deviceId,'E')
+}
+
+// Repeat full preparation and disconnect to expose retained state/timers.
+p=page()
+for(let cycle=0;cycle<30;cycle++) {
+  p.connectDevice(event('R'));connects.at(-1).success()
+  services.at(-1).success(svc);chars.at(-1).success(characteristics)
+  const ready=notifies.at(-1),deadline=timers.findLast(x=>x.ms===15000)
+  ready.success();deadline.f()
+  assert.equal(p.data.connected,true,'ready connection survives old deadline')
+  p.disconnect()
+  assert.equal(p._connectionTimers.size,0)
+  assert.equal(p.data.visibleFiles.length,0)
+  ready.success();assert.equal(p.data.notifyEnabled,false)
+}
+console.log('PASS: preparation failures, explicit retry and 30 repeated connection/disconnection cycles')

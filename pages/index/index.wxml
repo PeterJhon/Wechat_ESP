@@ -7,7 +7,7 @@
     </view>
     <view class="status-pill {{connected ? 'is-on' : (bluetoothReady ? 'is-ready' : 'is-off')}}">
       <view class="dot"></view>
-      <text>{{connected ? '已连接' : (bluetoothReady ? '待连接' : '蓝牙关闭')}}</text>
+      <text>{{connected ? (notifyEnabled ? '已连接' : '正在准备连接…') : (bluetoothReady ? '待连接' : '蓝牙关闭')}}</text>
     </view>
   </view>
 
@@ -32,6 +32,10 @@
     </view>
 
     <!-- 搜索状态 -->
+    <view wx:if="{{connectionError}}" class="file-empty">
+      <text>{{connectionError}}</text>
+      <button class="chip-btn" bindtap="retryConnection" disabled="{{!bluetoothReady}}">重新连接</button>
+    </view>
     <view wx:if="{{searching}}" class="searching">
       <view class="loading"></view>
       <text>正在扫描附近设备…</text>
@@ -82,10 +86,16 @@
       <!-- 加载中 -->
       <view wx:if="{{loadingFiles}}" class="file-loading">
         <view class="loading"></view>
-        <text>加载中…</text>
+        <text>正在读取图片列表…</text>
       </view>
 
       <!-- 空状态 -->
+      <view wx:elif="{{fileListError && fileTotal === 0}}" class="file-empty" bindtap="requestFileList">
+        <text>{{fileListError}}</text>
+      </view>
+      <view wx:elif="{{!filesLoaded}}" class="file-empty" bindtap="requestFileList">
+        <text>等待读取图片，点击重试</text>
+      </view>
       <view wx:elif="{{fileTotal === 0}}" class="file-empty">
         <text>还没有图片，去"图片处理"里传一张</text>
       </view>
@@ -93,6 +103,9 @@
       <!-- 文件列表：只渲染窗口内的行，滚到底再放出下一屏 -->
       <scroll-view wx:else scroll-y class="file-scroll"
                    bindscrolltolower="onFileListScrollToLower" lower-threshold="80">
+        <view wx:if="{{fileListError}}" class="file-empty" bindtap="requestFileList">
+          <text>{{fileListError}}（保留上次列表）</text>
+        </view>
         <view wx:for="{{visibleFiles}}" wx:key="stem" class="file-row">
           <image wx:if="{{item.thumb}}" class="file-thumb" src="{{item.thumb}}" mode="aspectFill" />
           <view wx:else class="file-thumb file-thumb-empty"></view>
@@ -213,7 +226,7 @@
         <image class="preview-img" src="{{processedSrc}}" mode="aspectFit" />
         <view class="result-actions">
           <button class="btn-action" bindtap="saveImage">保存图片</button>
-          <button class="btn-action btn-send" wx:if="{{connected}}" bindtap="sendToDevice" loading="{{sending}}" disabled="{{sending}}">
+          <button class="btn-action btn-send" wx:if="{{connected}}" bindtap="sendToDevice" loading="{{sending}}" disabled="{{sending || !notifyEnabled || loadingFiles}}">
             {{sending ? '发送中 ' + sendProgress + '%' : '发送到设备'}}
           </button>
         </view>

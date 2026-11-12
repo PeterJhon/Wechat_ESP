@@ -108,6 +108,7 @@ Page({
     writeServiceId: '',       // 0xABF0 服务 ID
     writeCharacteristicId: '', // 0xABF1 特征值 ID
     notifyEnabled: false,
+    connectionError: '',
     mtu: 20,                  // 协商后的 MTU（默认20）
     sending: false,
     sendProgress: 0,
@@ -119,6 +120,8 @@ Page({
     renderedCount: 0,
     fileTotal: 0,
     loadingFiles: false,
+    filesLoaded: false,
+    fileListError: '',
 
     // 轮播设置。间隔同时是设备的休眠间隔，所以给档位而不是线性滑杆：
     // 这个值直接决定续航，跨三个数量级的滑杆不好用。
@@ -296,37 +299,50 @@ Page({
       console.log('蓝牙状态变化:', res)
       this.setData({ bluetoothReady: res.available })
       if (!res.available) {
+        if (this.data.searching) this.stopSearch()
         wx.showToast({ title: '蓝牙已关闭', icon: 'none' })
       }
     })
   },
 
   startSearch() {
-    if (this.data.searching) return
+    if (this.data.searching || this._bluetoothDisposed) return
+    const generation = (this._searchGeneration || 0) + 1
+    this._searchGeneration = generation
+    clearTimeout(this._searchTimer)
+    this.onDeviceFound()
     this.setData({ searching: true, devices: [] })
-
     wx.startBluetoothDevicesDiscovery({
-      allowDuplicatesKey: false,
+      // Re-report an already discovered peripheral after disconnect/re-scan.
+      // The UI merges advertisements by deviceId.
+      allowDuplicatesKey: true,
+      interval: 500,
       success: (res) => {
-        console.log('开始搜索设备', res)
-        this.onDeviceFound()
-        setTimeout(() => {
-          if (this.data.searching) this.stopSearch()
+        if (this._bluetoothDisposed || this._searchGeneration !== generation || !this.data.searching) return
+        console.log('Discovery started', res)
+        this._searchTimer = setTimeout(() => {
+          if (this._searchGeneration === generation) this.stopSearch()
         }, 15000)
       },
       fail: (err) => {
-        console.error('搜索失败', err)
+        if (this._bluetoothDisposed || this._searchGeneration !== generation) return
+        console.error('Discovery failed', err)
         this.setData({ searching: false })
-        wx.showToast({ title: '搜索失败', icon: 'none' })
+        wx.showToast({ title: '\u641c\u7d22\u5931\u8d25', icon: 'none' })
       }
     })
   },
 
   stopSearch() {
+    const generation = (this._searchGeneration || 0) + 1
+    this._searchGeneration = generation
+    clearTimeout(this._searchTimer)
+    this._searchTimer = null
+    this.setData({ searching: false })
     wx.stopBluetoothDevicesDiscovery({
-      success: () => {
-        console.log('停止搜索')
-        this.setData({ searching: false })
+      complete: () => {
+        if (this._bluetoothDisposed || this._searchGeneration !== generation) return
+        console.log('Discovery stopped')
       }
     })
   },
@@ -335,6 +351,7 @@ Page({
     if (this._deviceFoundListenerRegistered) return
     this._deviceFoundListenerRegistered = true
     this.registerBluetoothListener('BluetoothDeviceFound', (res) => {
+      if (!this.data.searching) return
       const newDevices = res.devices
         .filter(device => this.isTargetDevice(device))
         .map(device => {
@@ -388,6 +405,10 @@ Page({
 
   connectDevice(e) {
     const device = e.currentTarget.dataset.device
+    if (this._connectionCleanup?.deviceId === device.deviceId) {
+      wx.showToast({title: '正在释放旧连接，请稍后重试', icon: 'none'})
+      return
+    }
     if (this._bluetoothDisposed || (this.data.connected && this.data.currentDeviceId === device.deviceId)) return
     if (this._connectionAttempt?.deviceId === device.deviceId) return
     if (this.data.sending || this.data.loadingFiles || this._deletePending || this._selectOperation || this._slideshowOperation) {
@@ -398,6 +419,7 @@ Page({
       wx.showToast({ title: err.message, icon: 'none' }); return
     }
     if (this.data.searching) this.stopSearch()
+    this._lastConnectionDevice = {...device}
     const previousId = this.data.currentDeviceId
     this.resetSessionState()
     this.setData({connected: false, currentDeviceId: '', writeServiceId: '', writeCharacteristicId: '', notifyEnabled: false, mtu: 23})
@@ -420,17 +442,39 @@ Page({
         this.applyPanelFromName(device.name || device.localName)
         this.setData({connected: true, currentDeviceId: device.deviceId})
         wx.hideLoading()
-        wx.showToast({title: '连接成功', icon: 'success'})
         this.onConnectionClose()
+        this.scheduleConnectionTask(device.deviceId, attempt.session, () => {
+          this.failConnectionPreparation(device.deviceId, attempt.session, '连接准备超时，请重试')
+        }, 15000)
         this.getServices(device.deviceId, attempt.session)
       },
       fail: err => {
         if (!active()) return
         this._connectionAttempt = null
         wx.hideLoading()
+        this.setData({connectionError: '连接失败，请重试'})
         wx.showToast({title: err.errCode === 10003 || err.errCode === 10012 ? '连接超时，请靠近设备' : '连接失败', icon: 'none'})
       }
     })
+  },
+
+  retryConnection() {
+    if (this._lastConnectionDevice && !this._bluetoothDisposed) {
+      this.connectDevice({currentTarget: {dataset: {device: this._lastConnectionDevice}}})
+    }
+  },
+
+  failConnectionPreparation(deviceId, session, message) {
+    if (!this.connectionSessionActive(deviceId, session) || this.data.notifyEnabled) return
+    this.resetSessionState()
+    this.setData({connected: false, currentDeviceId: '', writeServiceId: '',
+      writeCharacteristicId: '', connectionError: message})
+    const cleanup = {deviceId}
+    this._connectionCleanup = cleanup
+    wx.closeBLEConnection({deviceId, complete: () => {
+      if (this._connectionCleanup === cleanup) this._connectionCleanup = null
+    }})
+    wx.showToast({title: message, icon: 'none'})
   },
 
   onConnectionClose() {
@@ -460,6 +504,10 @@ Page({
         console.log('获取服务成功', res)
         let completedCount = 0
         const totalServices = res.services.length
+        if (!totalServices) {
+          this.failConnectionPreparation(deviceId, session, '设备没有可用服务，请重试')
+          return
+        }
 
         res.services.forEach((service) => {
           this.getCharacteristics(deviceId, service.uuid, (charResult) => {
@@ -486,13 +534,20 @@ Page({
             }
 
             if (completedCount === totalServices) {
+              if (!this.data.writeCharacteristicId) {
+                this.failConnectionPreparation(deviceId, session, '未找到传输通道，请重试')
+                return
+              }
               // 服务发现完后再协商 MTU（此时才能成功）
               this.negotiateMTU(deviceId, 0, session)
             }
           }, session)
         })
       },
-      fail: (err) => console.error('获取服务失败', err)
+      fail: (err) => {
+        console.error('获取服务失败', err)
+        this.failConnectionPreparation(deviceId, session, '读取设备服务失败，请重试')
+      }
     })
   },
 
@@ -510,6 +565,7 @@ Page({
       success: () => {
         if (!this.connectionSessionActive(deviceId, session)) return
         console.log('Notify 已启用')
+        const firstReady = !this.data.notifyEnabled
         this.setData({ notifyEnabled: true })
         // Query slideshow state after connection
         this.scheduleConnectionTask(deviceId, session, () => this.querySlideshowState(), 300)
@@ -585,9 +641,14 @@ Page({
             })
           }
         })
+        // Request only after the notification listener can receive the reply.
+        if (firstReady) wx.showToast({title: '连接成功', icon: 'success'})
+        this.scheduleConnectionTask(deviceId, session, () => this.requestFileList({automatic: true, attempt: 0}), 0)
       },
       fail: (err) => {
+        if (!this.connectionSessionActive(deviceId, session)) return
         console.error('启用Notify失败', err)
+        this.failConnectionPreparation(deviceId, session, '开启通知失败，请重试')
       }
     })
   },
@@ -1473,7 +1534,7 @@ Page({
   /**
    * 请求文件列表 (CMD_FILE_LIST = 0x10)，分页拉取到收满为止。
    */
-  requestFileList() {
+  requestFileList(options = {}) {
     if (this.data.sending || this._deletePending || this._selectOperation || this._slideshowOperation || this.data.loadingFiles) return
     if (!this.data.connected) {
       wx.showToast({ title: '请先连接设备', icon: 'none' })
@@ -1482,6 +1543,18 @@ Page({
     if (!this.data.writeServiceId || !this.data.writeCharacteristicId) {
       wx.showToast({ title: '未找到目标特征值', icon: 'none' })
       return
+    }
+
+    this._fileListOperation = {
+      session: this._sessionGeneration || 0,
+      deviceId: this.data.currentDeviceId,
+      automatic: options.automatic === true,
+      attempt: Number.isInteger(options.attempt) ? options.attempt : 0,
+      previous: {
+        files: this._allFiles || [], index: this._stemIndex || new Map(),
+        visible: this.data.visibleFiles || [], total: this.data.fileTotal || 0,
+        rendered: this.data.renderedCount || 0, loaded: !!this.data.filesLoaded
+      }
     }
 
     this.clearFileList()
@@ -1494,6 +1567,7 @@ Page({
     this._listCursor = ''
     this.setData({
       loadingFiles: true,
+      fileListError: '',
       visibleFiles: [],
       renderedCount: 0,
       fileTotal: 0
@@ -1507,6 +1581,7 @@ Page({
    * 用游标而不是页码：上传和删除会让位置整体移动，页码会漏读或重读。
    */
   requestFileListPage() {
+    const operation = this._fileListOperation
     if (++this._listPages > MAX_LIST_PAGES) {
       console.warn('文件列表翻页次数超限，先展示已收到的部分')
       this.finishFileList()
@@ -1527,6 +1602,7 @@ Page({
       characteristicId: this.data.writeCharacteristicId,
       value: ab,
       fail: (err) => {
+        if (this._fileListOperation !== operation) return
         console.error('FILE_LIST 发送失败:', err)
         this.abortFileList('请求发送失败')
       }
@@ -1701,10 +1777,12 @@ Page({
   },
 
   armListTimeout(reason) {
+    const operation = this._fileListOperation
     if (this._fileListTimer) {
       clearTimeout(this._fileListTimer)
     }
     this._fileListTimer = setTimeout(() => {
+      if (this._fileListOperation !== operation) return
       this._fileListTimer = null
       this.abortFileList(reason + '超时（已收到 ' + this._fileListLength + ' 字节）')
     }, FILE_LIST_TIMEOUT_MS)
@@ -1805,6 +1883,7 @@ Page({
   },
 
   finishFileList() {
+    this._fileListOperation = null
     const files = this._allFiles
     console.log('文件列表解析完成: ' + files.length + '/' + this._listTotal + ' 个文件')
 
@@ -1816,10 +1895,14 @@ Page({
       visibleFiles: files.slice(0, rendered),
       renderedCount: rendered,
       fileTotal: files.length,
-      loadingFiles: false
+      loadingFiles: false,
+      filesLoaded: true,
+      fileListError: ''
     })
 
     this.pruneThumbnailCache(files)
+    // The initial state query may have been deferred by a long file list.
+    this.querySlideshowState()
     this.loadThumbnails(this.data.visibleFiles)
   },
 
@@ -1828,6 +1911,7 @@ Page({
    * 产生上千个节点，scroll-view 不做回收。
    */
   onFileListScrollToLower() {
+    if (this.data.loadingFiles) return
     const files = this._allFiles || []
     if (this.data.renderedCount >= files.length) return
 
@@ -1843,7 +1927,25 @@ Page({
   abortFileList(reason) {
     console.warn('文件列表接收失败: ' + reason)
     this.clearFileList()
-    this.setData({ loadingFiles: false })
+    const operation = this._fileListOperation
+    if (operation?.previous) {
+      const previous = operation.previous
+      this._allFiles = previous.files
+      this._stemIndex = previous.index
+      this.setData({visibleFiles: previous.visible, fileTotal: previous.total,
+        renderedCount: previous.rendered, filesLoaded: previous.loaded})
+    }
+    this.setData({ loadingFiles: false, fileListError: '图片列表读取失败，请点击重试' })
+    if (operation?.automatic && operation.attempt < 2 &&
+        this.connectionSessionActive(operation.deviceId, operation.session)) {
+      this.setData({fileListError: '读取失败，正在准备重试…'})
+      this.scheduleConnectionTask(operation.deviceId, operation.session, () => {
+        if (this._fileListOperation !== operation) return
+        this.setData({fileListError: '图片列表读取失败，请点击重试'})
+        this.requestFileList({automatic: true, attempt: operation.attempt + 1})
+      }, 1200)
+      return
+    }
     wx.showToast({ title: '文件列表读取失败', icon: 'none' })
   },
 
@@ -1862,6 +1964,11 @@ Page({
    * 重新连接后应该还能直接发送。
    */
   resetSessionState() {
+    this._fileListOperation = null
+    this._allFiles = []
+    this._stemIndex = new Map()
+    this.setData({filesLoaded: false, fileListError: '', visibleFiles: [], fileTotal: 0,
+      renderedCount: 0, connectionError: ''})
     this._connectionAttempt = null
     for (const timer of this._connectionTimers || []) clearTimeout(timer)
     this._connectionTimers = new Set()
