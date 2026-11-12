@@ -1182,7 +1182,7 @@ Page({
       wx.showToast({ title: '未找到目标特征值(0xABF1)', icon: 'none' })
       return
     }
-    if (this.data.sending || this._deletePending) {
+    if (this.data.sending || this._deletePending || this._selectOperation) {
       wx.showToast({ title: '正在发送中...', icon: 'none' })
       return
     }
@@ -1193,6 +1193,12 @@ Page({
       return
     }
 
+    // Rendering above yields: selection or another upload may have started.
+    if (!this.data.connected || this._bluetoothDisposed) return
+    if (this.data.sending || this._deletePending || this._selectOperation || this.data.loadingFiles) {
+      wx.showToast({ title: '请等待当前操作完成', icon: 'none' })
+      return
+    }
     const session = this._sessionGeneration || 0
     const assertSession = () => {
       if ((this._sessionGeneration || 0) !== session || !this.data.connected) {
@@ -1430,7 +1436,7 @@ Page({
    * 请求文件列表 (CMD_FILE_LIST = 0x10)，分页拉取到收满为止。
    */
   requestFileList() {
-    if (this.data.sending || this._deletePending || this.data.loadingFiles) return
+    if (this.data.sending || this._deletePending || this._selectOperation || this.data.loadingFiles) return
     if (!this.data.connected) {
       wx.showToast({ title: '请先连接设备', icon: 'none' })
       return
@@ -1508,7 +1514,7 @@ Page({
         const ab = cmd.buffer.slice(cmd.byteOffset, cmd.byteOffset + cmd.byteLength)
 
         // A successful BLE write only confirms delivery, not deletion.
-        if (this.data.sending || this.data.loadingFiles || this._deletePending) {
+        if (this.data.sending || this.data.loadingFiles || this._deletePending || this._selectOperation) {
           wx.showToast({ title: '请等待当前操作完成', icon: 'none' })
           return
         }
@@ -1572,75 +1578,84 @@ Page({
    * 选择图片显示 (CMD_FILE_SELECT = 0x12)
    */
   selectImage(e) {
+    if (!this.data.connected || this._bluetoothDisposed) return
+    if (this.data.sending || this.data.loadingFiles || this._deletePending || this._selectOperation) {
+      wx.showToast({ title: '请等待当前操作完成', icon: 'none' })
+      return
+    }
     const stem = e.currentTarget.dataset.stem
-    if (!this.data.connected) return
-
-    /* 记住最后点的是哪一张：下面的重试只在它仍然是最新选择时才发，
-     * 否则一次迟到的重试会把用户后来选的图顶掉。 */
+    const operation = {
+      session: this._sessionGeneration || 0,
+      deviceId: this.data.currentDeviceId,
+      timer: null,
+      waiter: null
+    }
+    this._selectOperation = operation
     this._pendingSelect = stem
-    this.sendSelect(stem, 0)
+    this.sendSelect(stem, 0, operation)
   },
 
-  /**
-   * 发送 FILE_SELECT，被限流时退避重试。
-   *
-   * 设备对会写卡的命令有「1 秒内不重复」的限流，超出的直接丢弃并回 status=2。
-   * 连续切图时后几次必然撞上它，而 README 约定客户端收到 2 应当退避重试 ——
-   * 不重试的话，用户看到的就是"点了没反应"。
-   */
-  sendSelect(stem, attempt) {
-    const MAX_SELECT_ATTEMPTS = 3
+  selectOperationActive(operation) {
+    return !!operation && this._selectOperation === operation &&
+      operation.session === (this._sessionGeneration || 0) &&
+      operation.deviceId === this.data.currentDeviceId && this.data.connected &&
+      !this._bluetoothDisposed && !this.data.sending && !this.data.loadingFiles && !this._deletePending
+  },
 
+  cancelSelect() {
+    const operation = this._selectOperation
+    if (!operation) return
+    this._selectOperation = null
+    this._pendingSelect = null
+    if (operation.timer !== null) clearTimeout(operation.timer)
+    const waiter = operation.waiter
+    if (waiter && this._ackWaiters && this._ackWaiters[0x02] === waiter) {
+      clearTimeout(waiter.timer)
+      delete this._ackWaiters[0x02]
+      waiter.resolve({ responded: false, ok: false })
+    }
+  },
+
+  sendSelect(stem, attempt = 0, operation = this._selectOperation) {
+    if (!this.selectOperationActive(operation)) {
+      if (operation && this._selectOperation === operation) this.cancelSelect()
+      return
+    }
     const cmd = new Uint8Array(1 + STEM_FIELD)
     cmd[0] = 0x12
     cmd.set(this.writeStemField(stem), 1)
-    const ab = cmd.buffer.slice(cmd.byteOffset, cmd.byteOffset + cmd.byteLength)
-
-    // 等设备的应答：仅凭 BLE 写入成功就报"已发送"，被拒绝时用户
-    // 完全看不到反馈。
     const ackPromise = this.waitForAck(0x02, 3000)
-
+    operation.waiter = this._ackWaiters[0x02]
     wx.writeBLECharacteristicValue({
       writeType: 'write',
-      deviceId: this.data.currentDeviceId,
+      deviceId: operation.deviceId,
       serviceId: this.data.writeServiceId,
       characteristicId: this.data.writeCharacteristicId,
-      value: ab,
-      fail: (err) => {
-        console.error('SELECT 发送失败:', err)
-        wx.showToast({ title: '发送失败', icon: 'none' })
+      value: cmd.buffer.slice(cmd.byteOffset, cmd.byteOffset + cmd.byteLength),
+      fail: () => {
+        if (!this.selectOperationActive(operation)) return
+        this.cancelSelect()
+        wx.showToast({ title: '显示请求发送失败', icon: 'none' })
       }
     })
-
-    ackPromise.then((ack) => {
-      if (!ack.responded) {
-        wx.showToast({ title: '设备未应答', icon: 'none' })
-      } else if (!ack.ok) {
-        if (ack.status === 2 && attempt < MAX_SELECT_ATTEMPTS &&
-            this._pendingSelect === stem) {
-          // 被限流丢弃。等过设备那 1 秒窗口再发一次 —— 中途改选别的图就放弃。
-          setTimeout(() => {
-            if (this._pendingSelect === stem) this.sendSelect(stem, attempt + 1)
-          }, SELECT_RETRY_MS)
-          return
-        }
-        wx.showToast({ title: '设备拒绝了显示指令', icon: 'none' })
-      } else {
-        wx.showToast({ title: '已开始显示', icon: 'success' })
+    ackPromise.then(ack => {
+      if (!this.selectOperationActive(operation)) {
+        if (this._selectOperation === operation) this.cancelSelect()
+        return
       }
+      if (ack.responded && !ack.ok && ack.status === 2 && attempt < 3) {
+        operation.timer = setTimeout(() => {
+          operation.timer = null
+          this.sendSelect(stem, attempt + 1, operation)
+        }, SELECT_RETRY_MS)
+        return
+      }
+      this.cancelSelect()
+      wx.showToast({ title: !ack.responded ? '设备未应答' :
+        ack.ok ? '已开始显示' : '设备拒绝了显示指令', icon: ack.ok ? 'success' : 'none' })
     })
   },
 
-  /**
-   * 开始接收一页文件列表应答。
-   * 首片进入会话，后续分片由 appendFileList 无条件追加——分片首字节是
-   * 任意字节，不能再按 0x10 判断，否则除首片外全被丢弃。
-   */
-  /**
-   * 超时从**发出请求**那一刻开始算，而不是等第一个分片到达。
-   * 否则设备对某一页完全不应答时（丢包、忙、重启），既没有分片也就没有
-   * 计时器，loadingFiles 会永远停在 true —— 界面看起来就是卡死。
-   */
   armListTimeout(reason) {
     if (this._fileListTimer) {
       clearTimeout(this._fileListTimer)
@@ -1804,6 +1819,7 @@ Page({
    */
   resetSessionState() {
     this._sessionGeneration = (this._sessionGeneration || 0) + 1
+    this.cancelSelect()
     this._deletePending = false
     this._dataAckFailure = null
     this._writeNoResponseSupported = false
