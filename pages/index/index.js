@@ -136,7 +136,8 @@ Page({
 
   onLoad() {
     this._panel = parsePanel('')
-    this.checkBluetooth()
+    this._bluetoothDisposed = false
+    this.initBluetooth()
     this._lastImageSrc = ''
   },
 
@@ -159,6 +160,7 @@ Page({
   },
 
   onShow() {
+    if (this._adapterInitialized) this.checkBluetooth()
     // Coming back from crop page: image may have been replaced
     if (this.data.imageSrc && this.data.imageSrc !== this._lastImageSrc) {
       this._rawPixels = null
@@ -174,6 +176,9 @@ Page({
   },
 
   onUnload() {
+    this._bluetoothDisposed = true
+    this.removeBluetoothListeners()
+    this.resetSessionState()
     if (this._sharpTimer) {
       clearTimeout(this._sharpTimer)
       this._sharpTimer = null
@@ -196,8 +201,13 @@ Page({
   // ========== 蓝牙相关方法 ==========
 
   checkBluetooth() {
+    if (!this._adapterInitialized) {
+      this.initBluetooth()
+      return
+    }
     wx.getBluetoothAdapterState({
       success: (res) => {
+        if (this._bluetoothDisposed) return
         console.log('蓝牙状态:', res)
         this.setData({
           bluetoothReady: res.available,
@@ -206,19 +216,33 @@ Page({
       },
       fail: (err) => {
         console.error('蓝牙不可用:', err)
-        this.setData({ adapterAvailable: false })
+        this.setData({ bluetoothReady: false, adapterAvailable: false })
+        if (err.errCode === 10000) {
+          this._adapterInitialized = false
+        }
       }
     })
   },
 
   initBluetooth() {
+    if (this._bluetoothOpening || this._bluetoothDisposed) return
+    this._bluetoothOpening = true
+    const generation = this._adapterGeneration || 0
     wx.openBluetoothAdapter({
       success: (res) => {
+        if (generation !== (this._adapterGeneration || 0) || this._bluetoothDisposed) return
+        this._bluetoothOpening = false
+        this._adapterInitialized = true
         console.log('蓝牙初始化成功', res)
-        this.setData({ bluetoothReady: true })
+        this.setData({ bluetoothReady: true, adapterAvailable: true })
         this.onBluetoothStateChange()
+        this.checkBluetooth()
       },
       fail: (err) => {
+        if (generation !== (this._adapterGeneration || 0) || this._bluetoothDisposed) return
+        this._bluetoothOpening = false
+        this._adapterInitialized = false
+        this.setData({ bluetoothReady: false, adapterAvailable: false })
         console.error('蓝牙初始化失败', err)
         wx.showToast({ title: '请开启蓝牙', icon: 'none' })
         if (err.errCode === 10001) {
@@ -234,11 +258,36 @@ Page({
     })
   },
 
+  registerBluetoothListener(name, handler) {
+    if (this._bluetoothDisposed) return
+    if (!this._bluetoothListeners) this._bluetoothListeners = {}
+    if (this._bluetoothListeners[name]) return
+    const callback = (res) => {
+      if (this._bluetoothDisposed) return
+      if (res.deviceId && this.data.currentDeviceId &&
+          res.deviceId !== this.data.currentDeviceId) return
+      handler(res)
+    }
+    this._bluetoothListeners[name] = callback
+    wx['on' + name](callback)
+  },
+
+  removeBluetoothListeners() {
+    for (const [name, callback] of Object.entries(this._bluetoothListeners || {})) {
+      if (typeof wx['off' + name] === 'function') wx['off' + name](callback)
+    }
+    this._bluetoothListeners = {}
+    this._adapterStateListenerRegistered = false
+    this._deviceFoundListenerRegistered = false
+    this._connStateListenerRegistered = false
+    this._notifyListenerRegistered = false
+  },
+
   onBluetoothStateChange() {
     // 只注册一次：在连接/搜索流程里重复注册会让同一条通知被投递多次
     if (this._adapterStateListenerRegistered) return
     this._adapterStateListenerRegistered = true
-    wx.onBluetoothAdapterStateChange((res) => {
+    this.registerBluetoothListener('BluetoothAdapterStateChange', (res) => {
       console.log('蓝牙状态变化:', res)
       this.setData({ bluetoothReady: res.available })
       if (!res.available) {
@@ -280,7 +329,7 @@ Page({
   onDeviceFound() {
     if (this._deviceFoundListenerRegistered) return
     this._deviceFoundListenerRegistered = true
-    wx.onBluetoothDeviceFound((res) => {
+    this.registerBluetoothListener('BluetoothDeviceFound', (res) => {
       const newDevices = res.devices
         .filter(device => this.isTargetDevice(device))
         .map(device => {
@@ -358,7 +407,7 @@ Page({
   onConnectionClose() {
     if (this._connStateListenerRegistered) return
     this._connStateListenerRegistered = true
-    wx.onBLEConnectionStateChange((res) => {
+    this.registerBluetoothListener('BLEConnectionStateChange', (res) => {
       if (!res.connected) {
         this.resetSessionState()
         this.setData({
@@ -424,6 +473,7 @@ Page({
       characteristicId: characteristicId,
       state: true,
       success: () => {
+        if (this._bluetoothDisposed) return
         console.log('Notify 已启用')
         this.setData({ notifyEnabled: true })
         // Query slideshow state after connection
@@ -434,7 +484,7 @@ Page({
         if (this._notifyListenerRegistered) return
         this._notifyListenerRegistered = true
 
-        wx.onBLECharacteristicValueChange((res) => {
+        this.registerBluetoothListener('BLECharacteristicValueChange', (res) => {
           const buf = new Uint8Array(res.value)
 
           // 预览读回分片（0x15）。必须同时确认确实有读回在等待：只看首字节
@@ -581,6 +631,9 @@ Page({
   },
 
   closeBluetooth() {
+    this._adapterGeneration = (this._adapterGeneration || 0) + 1
+    this._adapterInitialized = false
+    this._bluetoothOpening = false
     if (this.data.searching) this.stopSearch()
     if (this.data.connected) this.disconnect()
     wx.closeBluetoothAdapter({
@@ -1686,7 +1739,14 @@ Page({
    * 重新连接后应该还能直接发送。
    */
   resetSessionState() {
+    this._sessionGeneration = (this._sessionGeneration || 0) + 1
+    this._deletePending = false
+    for (const waiter of Object.values(this._ackWaiters || {})) {
+      clearTimeout(waiter.timer)
+      waiter.resolve({ responded: false, ok: false, status: -1, stem: '' })
+    }
     this.clearFileList()
+    if (this._previewPending) this._previewPending.reject(new Error("Bluetooth session ended"))
     this._previewPending = null
     this._previewProgress = 0
     this._ackWaiters = {}
