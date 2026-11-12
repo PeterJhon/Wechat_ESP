@@ -335,6 +335,7 @@ Page({
 
   startSearch() {
     if (this.data.searching || this._bluetoothDisposed) return
+    this._searchWaitingPanel = false
     const generation = (this._searchGeneration || 0) + 1
     this._searchGeneration = generation
     clearTimeout(this._searchTimer)
@@ -350,7 +351,7 @@ Page({
         console.log('Discovery started', res)
         this._searchTimer = setTimeout(() => {
           if (this._searchGeneration === generation) this.stopSearch()
-        }, 15000)
+        }, this._searchWaitingPanel ? 45000 : 15000)
       },
       fail: (err) => {
         if (this._bluetoothDisposed || this._searchGeneration !== generation) return
@@ -383,7 +384,7 @@ Page({
       const newDevices = res.devices
         .filter(device => this.isTargetDevice(device))
         .map(device => {
-          let name = device.name || device.localName || ''
+          let name = device.localName || device.name || ''
 
           if (!name && device.advertisData) {
             const adv = device.advertisData
@@ -397,10 +398,20 @@ Page({
           return {
             deviceId: device.deviceId,
             name: name,
+            starting: /^EINK-STARTING-/i.test(name),
             RSSI: device.RSSI,
             signal: this.signalLevel(device.RSSI)
           }
         })
+
+      if (newDevices.some(device => device.starting) && !this._searchWaitingPanel) {
+        this._searchWaitingPanel = true
+        const generation = this._searchGeneration
+        clearTimeout(this._searchTimer)
+        this._searchTimer = setTimeout(() => {
+          if (this._searchGeneration === generation) this.stopSearch()
+        }, 45000)
+      }
 
       const devices = this.data.devices
       newDevices.forEach(newDevice => {
@@ -408,7 +419,7 @@ Page({
         if (existingIndex === -1) {
           devices.push(newDevice)
         } else {
-          devices[existingIndex].RSSI = newDevice.RSSI
+          devices[existingIndex] = newDevice
         }
       })
 
@@ -433,6 +444,10 @@ Page({
 
   connectDevice(e) {
     const device = e.currentTarget.dataset.device
+    if (/^EINK-STARTING-/i.test(device.name || device.localName || '')) {
+      wx.showToast({title: '设备正在识别屏幕，请稍后连接', icon: 'none'})
+      return
+    }
     if (this._connectionCleanup?.deviceId === device.deviceId) {
       wx.showToast({title: '正在释放旧连接，请稍后重试', icon: 'none'})
       return

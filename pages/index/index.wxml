@@ -65,7 +65,7 @@
               <text>{{item.RSSI}} dBm</text>
             </view>
             <view class="device-status">
-              <text>{{connected && item.deviceId === currentDeviceId ? '已连接' : '连接'}}</text>
+              <text>{{item.starting ? '识别中' : (connected && item.deviceId === currentDeviceId ? '已连接' : '连接')}}</text>
             </view>
           </view>
         </view>
