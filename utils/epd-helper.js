@@ -4,6 +4,7 @@
  */
 
 import { processImageData, convertToEPD, colorCodesToBinary, colorCodesToImageData, analyzeColors, getDitherAlgorithmList, DEFAULT_CONFIG } from './epd-converter.js'
+import { panelForTag } from './panel.js'
 
 /**
  * 从 Canvas 获取图��并转换为墨水屏格式
@@ -34,23 +35,24 @@ export async function convertCanvas(canvas, options = {}) {
 /**
  * 将图片文件转换为墨水屏格式
  * @param {string} imagePath - 图片本地路径
- * @param {number} maxWidth - 最大宽度
- * @param {number} maxHeight - 最大高度
+ * @param {number} maxWidth - 目标宽度
+ * @param {number} maxHeight - 目标高度
  * @param {object} options - 转换配置
  * @returns {Promise<{ imageData: ImageData, colorCodes: number[][], binary: Uint8Array, width: number, height: number }>}
  */
-export async function convertImage(imagePath, maxWidth = 800, maxHeight = 480, options = {}) {
+export async function convertImage(imagePath, maxWidth = panelForTag().width,
+                                   maxHeight = panelForTag().height, options = {}) {
   return new Promise((resolve, reject) => {
     wx.getImageInfo({
       src: imagePath,
       success: (imgInfo) => {
-        // 计算缩放后的尺寸
-        let width = imgInfo.width
-        let height = imgInfo.height
-
-        const scale = Math.min(maxWidth / width, maxHeight / height, 1)
-        width = Math.floor(width * scale)
-        height = Math.floor(height * scale)
+        // The device accepts a complete native raster. Center-crop to fit;
+        // bounding-box scaling produced undersized .bin files for many photos.
+        const width = maxWidth
+        const height = maxHeight
+        const scale = Math.max(width / imgInfo.width, height / imgInfo.height)
+        const drawWidth = imgInfo.width * scale
+        const drawHeight = imgInfo.height * scale
 
         // 创建离屏 Canvas
         const canvas = wx.createOffscreenCanvas({
@@ -63,7 +65,8 @@ export async function convertImage(imagePath, maxWidth = 800, maxHeight = 480, o
         // 绘制图片
         const img = canvas.createImage()
         img.onload = () => {
-          ctx.drawImage(img, 0, 0, width, height)
+          ctx.drawImage(img, (width - drawWidth) / 2, (height - drawHeight) / 2,
+                        drawWidth, drawHeight)
 
           // 转换
           convertCanvas(canvas, options).then(result => {
@@ -124,7 +127,9 @@ export async function processAndExport(options = {}) {
       success: async (res) => {
         try {
           const imagePath = res.tempFiles[0].tempFilePath
-          const result = await convertImage(imagePath, 800, 480, options)
+          const panel = panelForTag(options.panelTag)
+          const result = await convertImage(imagePath, panel.width, panel.height,
+            Object.assign({ dither: panel.dither }, options))
 
           // 创建 Canvas 绘制结果
           const canvas = wx.createOffscreenCanvas({

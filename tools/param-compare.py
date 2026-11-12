@@ -6,14 +6,14 @@
 就把那组定成该面板的默认值。
 
 用法：
-    python tools/param-compare.py 照片.jpg                 # 参数扫描（默认）
-    python tools/param-compare.py 一张.jpg 另一张.jpg       # 多张，各一个子目录
-    python tools/param-compare.py --mode=algo 照片.jpg      # 改为换算法对比
-    python tools/param-compare.py --mode=combo 照片.jpg     # 改为组合扫描
-    python tools/param-compare.py                           # 无参时用内置合成图
+    python tools/param-compare.py --panel 800 照片.jpg       # 小屏参数扫描
+    python tools/param-compare.py --panel 1200 一张.jpg 另一张.jpg
+    python tools/param-compare.py --panel 1200 --mode=algo 照片.jpg
+    python tools/param-compare.py --panel 800 --mode=combo 照片.jpg
+    python tools/param-compare.py --panel 1200              # 内置合成图
 
-    python tools/param-compare.py 照片.jpg --upload         # 渲染完直接经蓝牙传到开发板
-    python tools/param-compare.py 照片.jpg --upload --device=EINK-1200-B21A
+    python tools/param-compare.py --panel 800 照片.jpg --upload
+    python tools/param-compare.py --panel 1200 照片.jpg --upload --device=EINK-1200-B21A
 
 --upload 需要先 pip install bleak；不装也能正常渲染，只是不能上传。
 同一批图的文件名用同一个时间前缀、序号连续，传上去后在列表里是连着的。
@@ -27,7 +27,7 @@
                   与对比度的相互抵消。
     algo          固定参数，只换抖动算法。
 
-输出（默认写到 tools/_param_out/）：
+输出（按面板写到 tools/_param_out/800 或 tools/_param_out/1200）：
     sheet.png        并排对比图，先看这张
     detail_*.png     每组在暗部的 1:1 裁切，用来判断“暗部糊不糊”
     <id>.png         每组的完整单图，可以放大细看
@@ -43,6 +43,7 @@
 80051（超过 2 MB 上限）。
 """
 
+import argparse
 import json
 import shutil
 import subprocess
@@ -66,7 +67,7 @@ except ImportError:
 ROOT = Path(__file__).resolve().parent.parent
 OUT = Path(__file__).resolve().parent / "_param_out"
 
-W, H = 1200, 1600          # 1200×1600 面板
+W, H = 0, 0              # main() loads the selected profile from utils/panel.js
 BASE = dict(brightness=1.05, saturation=1.35, gamma=0.85, contrast=1.1, warmth=1.05)
 # 上屏用的文件名前缀。固件只认 ^\d{8}-\d{6}-\d{3}$，且按名字排序 ——
 # 每次运行取当前时刻，所有图共用一个前缀、序号全局递增，这样它们在列表里
@@ -85,13 +86,13 @@ def next_stem():
     return stem
 
 
-ALGO = "atkinson"      # 参数扫描时固定用这个算法（上屏实测选定的）
+ALGO = None           # main() reads the selected panel's default algorithm
 
 
 def variants_algo():
     """算法对比：固定当前参数，只换抖动算法。"""
     return [
-        ("a0_hybrid_默认", "hybrid · 当前默认值",               dict(BASE, dither="hybrid")),
+        ("a0_hybrid",     "hybrid · 同参数",                    dict(BASE, dither="hybrid")),
         ("a1_floyd",       "floyd · 同参数",                    dict(BASE, dither="floyd")),
         ("a2_jjn",         "jjn · 同参数",                      dict(BASE, dither="jjn")),
         ("a3_stucki",      "stucki · 同参数",                   dict(BASE, dither="stucki")),
@@ -228,7 +229,7 @@ def synthetic() -> Image.Image:
 
 
 def prepare(src):
-    """按 rasterizeToPanel 的做法：等比缩放后居中裁切到 1200×1600。"""
+    """等比缩放后居中裁切到所选面板的原生尺寸。"""
     img = Image.open(src).convert("RGB") if src else synthetic()
     scale = max(W / img.width, H / img.height)
     img = img.resize((max(1, round(img.width * scale)),
@@ -334,7 +335,7 @@ def run_one(src, out, variants):
                  out / f"detail_{m['id']}.png")
 
     # —— 并排总图 ——
-    tile_w, tile_h, cols = 288, 384, 3
+    tile_w, tile_h, cols = 288, round(288 * H / W), 3
     rows = (len(manifest) + cols - 1) // cols
     gap, label_h = 10, 34          # 不要叫 pad —— 会和上面的 pad() 函数撞名
     sheet = Image.new("RGB", (cols * (tile_w + gap) + gap,
@@ -357,33 +358,27 @@ def run_one(src, out, variants):
 
 
 def main():
-    argv = sys.argv[1:]
-    mode = "params"            # 默认参数扫描：调增强参数比换算法更常做
-    upload = False
-    device = None
-    no_preview = False
-    rest = []
-    for a in argv:
-        if a == "--upload":
-            upload = True
-        elif a == "--no-preview":
-            no_preview = True
-        elif a.startswith("--device="):
-            device = a.split("=", 1)[1]
-        elif a.startswith("--mode="):
-            mode = a.split("=", 1)[1]
-            if mode not in MODES:
-                sys.exit(f"未知模式 {mode}，可选：{'、'.join(MODES)}")
-        elif a.startswith("-"):
-            sys.exit(f"未知选项 {a}")
-        else:
-            rest.append(a)
+    global W, H, ALGO, OUT
+    parser = argparse.ArgumentParser(description="双面板参数对比与上屏工具")
+    parser.add_argument('images', nargs='*')
+    parser.add_argument('--panel', required=True, choices=('800', '1200'))
+    parser.add_argument('--mode', default='params', choices=MODES)
+    parser.add_argument('--upload', action='store_true')
+    parser.add_argument('--device')
+    parser.add_argument('--no-preview', action='store_true')
+    args = parser.parse_args()
+    mode, upload, device, no_preview = args.mode, args.upload, args.device, args.no_preview
+    profiles = json.loads(subprocess.check_output(
+        ['node', str(ROOT / 'tools/param-render.mjs'), '--profiles'], cwd=ROOT))
+    profile = profiles[args.panel]
+    W, H, ALGO = profile['width'], profile['height'], profile['dither']
+    OUT = OUT / args.panel
 
     if (device or no_preview) and not upload:
         sys.exit("--device/--no-preview 只和 --upload 一起用")
 
     variants = MODES[mode]()
-    srcs = [Path(a) for a in rest]
+    srcs = [Path(a) for a in args.images]
     for s in srcs:
         if not s.exists():
             sys.exit(f"找不到图片：{s}")
@@ -404,7 +399,7 @@ def main():
             sys.exit("没有可上传的 .bin")
         cmd = [sys.executable,
                str(Path(__file__).with_name("param_upload.py")),
-               *map(str, bins)]
+               f'--panel={args.panel}', *map(str, bins)]
         if device:
             cmd.append(f"--name={device}")
         if no_preview:

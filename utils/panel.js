@@ -23,15 +23,23 @@ export const PANEL_PROFILES = {
 /** 名字里没有标识时按小屏处理 —— 兼容还没重烧的旧固件 */
 export const DEFAULT_PANEL_TAG = '800'
 
+/** Explicit selections must be recognized; never combine an unknown tag with
+ * the small panel's dimensions. Legacy names without a tag still use 800. */
+export function panelForTag(tag = DEFAULT_PANEL_TAG) {
+  tag = String(tag)
+  const profile = PANEL_PROFILES[tag]
+  if (!profile) throw new Error('不支持的屏幕型号：' + tag)
+  return Object.assign({ tag }, profile)
+}
+
 /**
- * 从广播名解析面板。认不出标识就退回默认面板。
+ * 从广播名解析面板。旧名字无型号时兼容默认面板，未知显式型号报错。
  * @param {string} name 设备广播名，如 "EINK-1200-B21A"
  */
 export function parsePanel(name) {
-  const match = /^EINK-(\d+)-/i.exec(String(name || ''))
+  const match = /^EINK-([^-]+)-/i.exec(String(name || ''))
   const tag = match ? match[1] : DEFAULT_PANEL_TAG
-  const profile = PANEL_PROFILES[tag] || PANEL_PROFILES[DEFAULT_PANEL_TAG]
-  return Object.assign({ tag: String(tag) }, profile)
+  return panelForTag(tag)
 }
 
 /**
@@ -51,4 +59,8 @@ export function cropOptionsFor(panel) {
 /** 一帧图像在 SD 上的字节数（每像素 1 字节调色板码） */
 export function panelBytes(panel) {
   return panel.width * panel.height
+}
+
+export function panelWireBytes(panel) {
+  return Math.ceil(panelBytes(panel) * 3 / 8)
 }

@@ -321,6 +321,12 @@ Page({
   connectDevice(e) {
     const device = e.currentTarget.dataset.device
     if (this.data.connected && this.data.currentDeviceId === device.deviceId) return
+    try {
+      parsePanel(device.name || device.localName)
+    } catch (err) {
+      wx.showToast({ title: err.message, icon: 'none' })
+      return
+    }
 
     if (this.data.searching) this.stopSearch()
 
@@ -331,7 +337,7 @@ Page({
       timeout: 10000,
       success: () => {
         console.log('连接成功', device.deviceId)
-        this.applyPanelFromName(device.name)
+        this.applyPanelFromName(device.name || device.localName)
         this.setData({ connected: true, currentDeviceId: device.deviceId })
         wx.hideLoading()
         wx.showToast({ title: '连接成功', icon: 'success' })

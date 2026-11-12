@@ -3,6 +3,8 @@
 // 协议与 pages/index/index.js 保持一致；这里只做连接和上传当前主图 + JPEG
 // 预览，不复制相册列表、删除、选择或轮播控制。
 
+import { PANEL_PROFILES, panelWireBytes } from '../utils/panel.js'
+
 export const BLE_SERVICE_UUID = 0xABF0
 export const BLE_CHARACTERISTIC_UUID = 0xABF1
 export const STEM_FIELD = 20
@@ -17,7 +19,8 @@ const CMD_ACK = 0xFF
 
 const FAST_TOTAL_BYTES = 509       // command + 508B，固件 ATT MTU 是 512
 const COMPAT_TOTAL_BYTES = 20      // command + 19B，默认 ATT MTU 23 也安全
-const WIRE_BYTES_BY_PANEL = { '800': 144000, '1200': 720000 }
+const WIRE_BYTES_BY_PANEL = Object.fromEntries(Object.entries(PANEL_PROFILES)
+  .map(([tag, panel]) => [tag, panelWireBytes(panel)]))
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
 
 function toBytes(value) {

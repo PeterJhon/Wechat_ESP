@@ -13,6 +13,12 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { convertToEPD, colorCodesToImageData,
          colorCodesToBinary } from '../utils/epd-converter.js'
+import { PANEL_PROFILES } from '../utils/panel.js'
+
+if (process.argv[2] === '--profiles') {
+  console.log(JSON.stringify(PANEL_PROFILES))
+  process.exit(0)
+}
 
 const job = JSON.parse(readFileSync(process.argv[2], 'utf8'))
 const { width, height, rgbaPath, outDir, variants } = job

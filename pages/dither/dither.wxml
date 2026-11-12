@@ -2,7 +2,7 @@
 <view class="container">
   <view class="header">
     <text class="title">墨水屏抖动算法</text>
-    <text class="subtitle">7色 E-Paper Display Converter</text>
+    <text class="subtitle">六色 E-Paper 算法预览</text>
   </view>
 
   <!-- 控制面板 -->
@@ -90,9 +90,9 @@
     </view>
   </view>
 
-  <!-- 7色调色板展示 -->
+  <!-- 六色调色板展示 -->
   <view class="palette">
-    <text class="palette-title">7色调色板</text>
+    <text class="palette-title">六色调色板</text>
     <view class="palette-colors">
       <view class="palette-color" style="background: #000000">
         <text class="color-label">黑</text>

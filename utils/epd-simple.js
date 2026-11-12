@@ -14,6 +14,7 @@
 
 import { convertImage, exportToFile } from './epd-helper.js'
 import { DEFAULT_CONFIG, getDitherAlgorithmList } from './epd-converter.js'
+import { panelForTag } from './panel.js'
 
 /**
  * 快速转换图片
@@ -22,14 +23,15 @@ import { DEFAULT_CONFIG, getDitherAlgorithmList } from './epd-converter.js'
  * @param {object} options - 其他选项
  * @returns {Promise<object>}
  */
-export async function quickConvert(imagePath, algorithm = 'hybrid', options = {}) {
+export async function quickConvert(imagePath, algorithm, options = {}) {
+  const panel = panelForTag(options.panelTag)
   const config = {
     ...DEFAULT_CONFIG,
-    dither: algorithm,
+    dither: algorithm || panel.dither,
     ...options
   }
 
-  const result = await convertImage(imagePath, 800, 480, config)
+  const result = await convertImage(imagePath, panel.width, panel.height, config)
 
   // 导出为临时文件
   const canvas = wx.createOffscreenCanvas({
@@ -53,7 +55,7 @@ export async function quickConvert(imagePath, algorithm = 'hybrid', options = {}
  * @param {string} algorithm - 抖动算法
  * @returns {Promise<object>}
  */
-export async function chooseAndConvert(algorithm = 'hybrid') {
+export async function chooseAndConvert(algorithm, options = {}) {
   return new Promise((resolve, reject) => {
     wx.chooseMedia({
       count: 1,
@@ -61,7 +63,7 @@ export async function chooseAndConvert(algorithm = 'hybrid') {
       sourceType: ['album', 'camera'],
       success: async (res) => {
         try {
-          const result = await quickConvert(res.tempFiles[0].tempFilePath, algorithm)
+          const result = await quickConvert(res.tempFiles[0].tempFilePath, algorithm, options)
           resolve(result)
         } catch (e) {
           reject(e)
