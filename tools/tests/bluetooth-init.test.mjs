@@ -27,3 +27,27 @@ calls=[];p=page();p.onLoad();const stale=opening;p.closeBluetooth();stale.succes
 assert.deepEqual(calls,['open','close'])
 assert.equal(p._adapterInitialized,false)
 console.log('PASS: open before query, duplicate init suppressed, failed init stays unavailable, stale open ignored')
+
+let pending=[]
+wx.getBluetoothAdapterState=x=>pending.push(x)
+p=page();p._adapterInitialized=true
+p.checkBluetooth();p.checkBluetooth()
+pending[1].success({available:true});pending[0].fail({errCode:10000})
+assert.equal(p.data.bluetoothReady,true)
+assert.equal(p._adapterInitialized,true)
+// An adapter-off event clears stale connection state even if no separate
+// BLE disconnection event arrives; a delayed state query cannot resurrect it.
+let stateChange
+wx.onBluetoothAdapterStateChange=f=>{stateChange=f}
+wx.hideLoading=()=>{}
+p.onBluetoothStateChange()
+p.data.connected=true;p.data.currentDeviceId='old';p.data.notifyEnabled=true
+p.checkBluetooth();const delayed=pending.at(-1)
+stateChange({available:false})
+assert.equal(p.data.connected,false)
+assert.equal(p.data.notifyEnabled,false)
+delayed.success({available:true})
+assert.equal(p.data.bluetoothReady,false)
+stateChange({available:true})
+assert.equal(p.data.bluetoothReady,true)
+console.log('PASS: stale adapter queries and missing disconnection events cannot retain an old connection')

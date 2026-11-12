@@ -28,7 +28,9 @@ const FILE_WINDOW_STEP = 50
 // 翻页上限，防止设备异常时无限请求
 const MAX_LIST_PAGES = 200
 // 单页记录数上限：设备每页最多 16 条，超过说明头部被解析成了垃圾
-const MAX_LIST_RECORDS = 1024
+const MAX_LIST_RECORDS = 16
+const MAX_DEVICE_IMAGES = 512
+const MAX_LIST_BYTES = FILE_LIST_HEADER_SIZE + MAX_LIST_RECORDS * FILE_LIST_RECORD_SIZE
 const THUMB_PREFIX = 'thumb_'
 // 缩略图批量合并 setData 的条数
 const THUMB_BATCH_SIZE = 10
@@ -165,7 +167,10 @@ Page({
   },
 
   onShow() {
+    this._pageHidden = false
     if (this._adapterInitialized) this.checkBluetooth()
+    if (this.data.connected && this.data.notifyEnabled && this.data.filesLoaded &&
+        !this.data.sending && !this.data.loadingFiles) this.loadThumbnails(this.data.visibleFiles)
     // Coming back from crop page: image may have been replaced
     if (this.data.imageSrc && this.data.imageSrc !== this._lastImageSrc) {
       this._rawPixels = null
@@ -178,6 +183,13 @@ Page({
       this._lastImageSrc = this.data.imageSrc
       this.rasterizeSource(this.data.imageSrc)
     }
+  },
+
+  onHide() {
+    this._pageHidden = true
+    if (this.data.searching) this.stopSearch()
+    this._thumbGeneration = (this._thumbGeneration || 0) + 1
+    if (this._previewPending) this._previewPending.reject(new Error('Page hidden'))
   },
 
   onUnload() {
@@ -210,23 +222,38 @@ Page({
       this.initBluetooth()
       return
     }
+    const query = (this._adapterStateQuery || 0) + 1
+    this._adapterStateQuery = query
+    const generation = this._adapterGeneration || 0
+    const active = () => !this._bluetoothDisposed && this._adapterStateQuery === query &&
+      generation === (this._adapterGeneration || 0)
     wx.getBluetoothAdapterState({
       success: (res) => {
-        if (this._bluetoothDisposed) return
+        if (!active()) return
         console.log('蓝牙状态:', res)
-        this.setData({
-          bluetoothReady: res.available,
-          adapterAvailable: res.available
-        })
+        this.applyBluetoothAvailability(res.available)
       },
       fail: (err) => {
+        if (!active()) return
         console.error('蓝牙不可用:', err)
-        this.setData({ bluetoothReady: false, adapterAvailable: false })
+        this.applyBluetoothAvailability(false)
         if (err.errCode === 10000) {
           this._adapterInitialized = false
         }
       }
     })
+  },
+
+  applyBluetoothAvailability(available) {
+    this.setData({bluetoothReady: available, adapterAvailable: available})
+    if (available) return
+    this._connectionCleanup = null
+    if (this.data.searching) this.stopSearch()
+    if (this.data.connected || this._connectionAttempt) {
+      this.resetSessionState()
+      this.setData({connected: false, currentDeviceId: '', writeServiceId: '', writeCharacteristicId: ''})
+      wx.hideLoading()
+    }
   },
 
   initBluetooth() {
@@ -297,7 +324,8 @@ Page({
     this._adapterStateListenerRegistered = true
     this.registerBluetoothListener('BluetoothAdapterStateChange', (res) => {
       console.log('蓝牙状态变化:', res)
-      this.setData({ bluetoothReady: res.available })
+      this._adapterStateQuery = (this._adapterStateQuery || 0) + 1
+      this.applyBluetoothAvailability(res.available)
       if (!res.available) {
         if (this.data.searching) this.stopSearch()
         wx.showToast({ title: '蓝牙已关闭', icon: 'none' })
@@ -1583,8 +1611,7 @@ Page({
   requestFileListPage() {
     const operation = this._fileListOperation
     if (++this._listPages > MAX_LIST_PAGES) {
-      console.warn('文件列表翻页次数超限，先展示已收到的部分')
-      this.finishFileList()
+      this.abortFileList('文件列表翻页次数超限')
       return
     }
 
@@ -1794,6 +1821,7 @@ Page({
   },
 
   beginFileList(bytes) {
+    if (!this.data.loadingFiles || !this._fileListOperation) return
     // 不动定时器：它是按"发请求"计的，分片到达只是让它继续跑
     this.resetFileListBuffer()
 
@@ -1816,6 +1844,10 @@ Page({
 
   appendFileList(chunk) {
     if (!this._fileListBuffer) return
+    if (this._fileListLength + chunk.length > MAX_LIST_BYTES) {
+      this.abortFileList('列表分片超出单页上限')
+      return
+    }
 
     if (this._fileListLength + chunk.length > this._fileListBuffer.length) {
       const grown = new Uint8Array(this._fileListLength + chunk.length)
@@ -1833,15 +1865,26 @@ Page({
 
     this._listTotal = buf[1] | (buf[2] << 8)
     const count = buf[3] | (buf[4] << 8)
+    if (count > MAX_LIST_RECORDS || this._listTotal > MAX_DEVICE_IMAGES || count > this._listTotal) {
+      this.abortFileList('列表头部超出设备容量')
+      return
+    }
     const expected = FILE_LIST_HEADER_SIZE + count * FILE_LIST_RECORD_SIZE
     if (this._fileListLength < expected) return
+    if (this._fileListLength !== expected) {
+      this.abortFileList('列表分片长度异常')
+      return
+    }
 
     let lastStem = ''
     try {
       for (let i = 0; i < count; i++) {
         const off = FILE_LIST_HEADER_SIZE + i * FILE_LIST_RECORD_SIZE
         const stem = this.readStemField(buf, off)
-        if (!stem) continue
+        if (!stem || stem <= (lastStem || this._listCursor || '')) {
+          throw new Error('列表游标没有前进')
+        }
+        if (this._allFiles.length >= MAX_DEVICE_IMAGES) throw new Error('列表超出设备容量')
         const rawSize = (buf[off + STEM_FIELD] | (buf[off + STEM_FIELD + 1] << 8) |
                          (buf[off + STEM_FIELD + 2] << 16) |
                          (buf[off + STEM_FIELD + 3] << 24)) >>> 0
@@ -1869,6 +1912,11 @@ Page({
 
     this.resetFileListBuffer()
 
+    if (this._allFiles.length < this._listTotal &&
+        (!count || this._listPages >= MAX_LIST_PAGES)) {
+      this.abortFileList('设备返回的图片列表不完整')
+      return
+    }
     // 用最后一条的名字当游标继续翻页：total 每页头部都有，翻到收满为止
     if (count > 0 && lastStem &&
         this._allFiles.length < this._listTotal &&
@@ -2043,6 +2091,7 @@ Page({
     const previous = this._thumbnailQueue || Promise.resolve()
     const task = previous.catch(() => {}).then(() => {
       if (generation !== (this._thumbGeneration || 0) || this._bluetoothDisposed) return
+      if (this._pageHidden) return
       return this.loadThumbnailBatch(files, generation)
     })
     this._thumbnailQueue = task.catch(err => console.warn('Thumbnail load failed:', err))
@@ -2051,20 +2100,23 @@ Page({
 
   async loadThumbnailBatch(files, generation) {
     const current = () => generation === (this._thumbGeneration || 0) &&
-      this.data.connected && !this._bluetoothDisposed && !this.data.sending
+      this.data.connected && !this._bluetoothDisposed && !this._pageHidden && !this.data.sending
     const targets = files.filter(f => f.previewSize > 0 && !f.thumb)
     const pending = []
+    let lastFlush = 0
 
     const flush = () => {
       if (!pending.length || !current()) return
       const patch = {}
       for (const item of pending) {
+        item.file.thumb = item.path
         const index = this._stemIndex ? this._stemIndex.get(item.stem) : -1
         if (index >= 0 && index < this.data.renderedCount) {
           patch[`visibleFiles[${index}].thumb`] = item.path
         }
       }
       pending.length = 0
+      lastFlush = Date.now()
       if (Object.keys(patch).length) this.setData(patch)
     }
 
@@ -2075,9 +2127,8 @@ Page({
       const cached = await this.fileExists(path)
       if (!current()) return
       if (cached) {
-        file.thumb = path
-        pending.push({ stem: file.stem, path })
-        if (pending.length >= THUMB_BATCH_SIZE) flush()
+        pending.push({ stem: file.stem, path, file })
+        if (pending.length >= THUMB_BATCH_SIZE || Date.now() - lastFlush >= 120) flush()
         continue
       }
 
@@ -2086,13 +2137,12 @@ Page({
         if (!current()) return
         await this.writeFile(path, data)
         if (!current()) return
-        file.thumb = path
-        pending.push({ stem: file.stem, path })
+        pending.push({ stem: file.stem, path, file })
       } catch (e) {
         console.warn('缩略图拉取失败 ' + file.stem + ':', e)
       }
 
-      if (pending.length >= THUMB_BATCH_SIZE) flush()
+      if (pending.length >= THUMB_BATCH_SIZE || Date.now() - lastFlush >= 120) flush()
     }
     flush()
   },
@@ -2126,7 +2176,7 @@ Page({
   readPreview(stem, totalSize) {
     const generation = this._thumbGeneration || 0
     const active = () => generation === (this._thumbGeneration || 0) &&
-      this.data.connected && !this._bluetoothDisposed
+      this.data.connected && !this._bluetoothDisposed && !this._pageHidden
     const buffer = new Uint8Array(totalSize)
     const deviceId = this.data.currentDeviceId
     const serviceId = this.data.writeServiceId

@@ -49,3 +49,27 @@ assert.equal(delivered,0)
 for(const name of names)for(const callback of listeners.get(name))callback({deviceId:'d'})
 assert.equal(delivered,4)
 console.log('PASS: refresh/delete exclusion, serialized previews, stale-read cancellation, preview cleanup and scoped listener removal')
+
+// A slow second preview must not hide the first completed preview until ten
+// thumbnails have accumulated.
+p=page();const patches=[];p.setData=x=>patches.push(x)
+p.data.renderedCount=2;p._stemIndex=new Map([['first',0],['slow',1]])
+p.fileExists=async()=>false;p.writeFile=async()=>{}
+let slowDone
+p.readPreview=stem=>stem==='first'?Promise.resolve(new ArrayBuffer(1)):new Promise(r=>{slowDone=r})
+const responsive=p.loadThumbnails([{stem:'first',previewSize:1},{stem:'slow',previewSize:1}])
+await tick()
+assert.equal(patches.length,1)
+assert(patches[0]['visibleFiles[0].thumb'])
+slowDone(new ArrayBuffer(1));await responsive
+
+p=page();p.writeStemField=()=>new Uint8Array(20)
+const hidden=p.readPreview('a',10)
+const hiddenRejected=assert.rejects(hidden,/Page hidden/)
+p.onHide();await hiddenRejected
+assert.equal(p._previewPending,null)
+let resumed=0
+p.data.notifyEnabled=true;p.data.filesLoaded=true;p.data.visibleFiles=[]
+p.loadThumbnails=()=>{resumed++}
+p.onShow();assert.equal(resumed,1)
+console.log('PASS: first thumbnail appears promptly; background preview cancels and resumes on return')
