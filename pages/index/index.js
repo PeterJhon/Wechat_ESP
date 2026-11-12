@@ -1409,6 +1409,7 @@ Page({
    * 请求文件列表 (CMD_FILE_LIST = 0x10)，分页拉取到收满为止。
    */
   requestFileList() {
+    if (this.data.sending || this._deletePending || this.data.loadingFiles) return
     if (!this.data.connected) {
       wx.showToast({ title: '请先连接设备', icon: 'none' })
       return
@@ -1420,6 +1421,7 @@ Page({
 
     this.clearFileList()
     this._thumbGeneration = (this._thumbGeneration || 0) + 1
+    if (this._previewPending) this._previewPending.reject(new Error("Preview cancelled by list refresh"))
     this._allFiles = []
     this._stemIndex = new Map()
     this._listTotal = 0
@@ -1829,13 +1831,25 @@ Page({
    * 只拉传入的窗口（即可见行），并且把 setData 合并成批——
    * 每张缩略图一次 setData 在几百张时就是几百次跨线程往返。
    */
-  async loadThumbnails(files) {
-    const generation = ++this._thumbGeneration
+  loadThumbnails(files) {
+    const generation = this._thumbGeneration || 0
+    const previous = this._thumbnailQueue || Promise.resolve()
+    const task = previous.catch(() => {}).then(() => {
+      if (generation !== (this._thumbGeneration || 0) || this._bluetoothDisposed) return
+      return this.loadThumbnailBatch(files, generation)
+    })
+    this._thumbnailQueue = task.catch(err => console.warn('Thumbnail load failed:', err))
+    return task
+  },
+
+  async loadThumbnailBatch(files, generation) {
+    const current = () => generation === (this._thumbGeneration || 0) &&
+      this.data.connected && !this._bluetoothDisposed
     const targets = files.filter(f => f.previewSize > 0 && !f.thumb)
     const pending = []
 
     const flush = () => {
-      if (!pending.length) return
+      if (!pending.length || !current()) return
       const patch = {}
       for (const item of pending) {
         const index = this._stemIndex ? this._stemIndex.get(item.stem) : -1
@@ -1848,11 +1862,12 @@ Page({
     }
 
     for (const file of targets) {
-      if (generation !== this._thumbGeneration) return
-      if (!this.data.connected) return
+      if (!current()) return
 
       const path = this.thumbPath(file.stem)
-      if (await this.fileExists(path)) {
+      const cached = await this.fileExists(path)
+      if (!current()) return
+      if (cached) {
         file.thumb = path
         pending.push({ stem: file.stem, path })
         if (pending.length >= THUMB_BATCH_SIZE) flush()
@@ -1861,7 +1876,9 @@ Page({
 
       try {
         const data = await this.readPreview(file.stem, file.previewSize)
+        if (!current()) return
         await this.writeFile(path, data)
+        if (!current()) return
         file.thumb = path
         pending.push({ stem: file.stem, path })
       } catch (e) {
@@ -1900,12 +1917,16 @@ Page({
    * 而不是把后续数据错位拼接成一张损坏的图。
    */
   readPreview(stem, totalSize) {
+    const generation = this._thumbGeneration || 0
+    const active = () => generation === (this._thumbGeneration || 0) &&
+      this.data.connected && !this._bluetoothDisposed
     const buffer = new Uint8Array(totalSize)
     const deviceId = this.data.currentDeviceId
     const serviceId = this.data.writeServiceId
     const characteristicId = this.data.writeCharacteristicId
 
     const send = (offset, want) => {
+      if (!active()) return Promise.reject(new Error("Preview session ended"))
       // 载荷：stem(20) + offset:u32 + length:u16
       const cmd = new Uint8Array(1 + STEM_FIELD + 6)
       cmd[0] = 0x15
@@ -1960,11 +1981,13 @@ Page({
       this._previewProgress = 0
 
       while (offset < totalSize) {
+        if (!active()) throw new Error("Preview session ended")
         if (++steps > MAX_PREVIEW_STEPS) {
           throw new Error('预览读取步数超限')
         }
         const want = Math.min(PREVIEW_CHUNK_REQUEST, totalSize - offset)
         const outcome = await requestBatch(offset, want)
+        if (!active()) throw new Error("Preview session ended")
 
         if (outcome === 'busy') {
           if (++busyRetries > MAX_PREVIEW_BUSY_RETRIES) {
@@ -2067,7 +2090,7 @@ Page({
   },
 
   /**
-   * 等待 FILE_END 应答。设备只有在收满 384000 字节后才会回 status=0；
+   * 等待 FILE_END 应答。设备只有在收满该面板的压缩数据后才会回 status=0；
    * 中途丢包会让它回非零状态，这里必须让调用方失败，
    * 否则“发送完成”会和“设备其实什么都没收到”长得一模一样。
    */
