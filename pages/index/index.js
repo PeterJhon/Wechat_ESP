@@ -264,7 +264,10 @@ Page({
     if (this._bluetoothDisposed) return
     if (!this._bluetoothListeners) this._bluetoothListeners = {}
     if (this._bluetoothListeners[name]) return
+    const session = this._sessionGeneration || 0
+    const deviceId = this.data.currentDeviceId
     const callback = (res) => {
+      if (name === 'BLECharacteristicValueChange' && !this.connectionSessionActive(deviceId, session)) return
       if (this._bluetoothDisposed) return
       if (res.deviceId && this.data.currentDeviceId &&
           res.deviceId !== this.data.currentDeviceId) return
@@ -369,39 +372,63 @@ Page({
     })
   },
 
+  connectionSessionActive(deviceId, session) {
+    return !this._bluetoothDisposed && this.data.connected &&
+      this.data.currentDeviceId === deviceId && (this._sessionGeneration || 0) === session
+  },
+
+  scheduleConnectionTask(deviceId, session, callback, delay) {
+    if (!this._connectionTimers) this._connectionTimers = new Set()
+    const timer = setTimeout(() => {
+      this._connectionTimers.delete(timer)
+      if (this.connectionSessionActive(deviceId, session)) callback()
+    }, delay)
+    this._connectionTimers.add(timer)
+  },
+
   connectDevice(e) {
     const device = e.currentTarget.dataset.device
-    if (this.data.connected && this.data.currentDeviceId === device.deviceId) return
-    try {
-      parsePanel(device.name || device.localName)
-    } catch (err) {
-      wx.showToast({ title: err.message, icon: 'none' })
+    if (this._bluetoothDisposed || (this.data.connected && this.data.currentDeviceId === device.deviceId)) return
+    if (this._connectionAttempt?.deviceId === device.deviceId) return
+    if (this.data.sending || this.data.loadingFiles || this._deletePending || this._selectOperation || this._slideshowOperation) {
+      wx.showToast({ title: '请等待当前操作完成', icon: 'none' })
       return
     }
-
+    try { parsePanel(device.name || device.localName) } catch (err) {
+      wx.showToast({ title: err.message, icon: 'none' }); return
+    }
     if (this.data.searching) this.stopSearch()
-
-    wx.showLoading({ title: '连接中...' })
-
+    const previousId = this.data.currentDeviceId
+    this.resetSessionState()
+    this.setData({connected: false, currentDeviceId: '', writeServiceId: '', writeCharacteristicId: '', notifyEnabled: false, mtu: 23})
+    const attempt = {deviceId: device.deviceId, session: this._sessionGeneration || 0}
+    this._connectionAttempt = attempt
+    if (previousId && previousId !== device.deviceId) wx.closeBLEConnection({deviceId: previousId, fail: () => {}})
+    wx.showLoading({title: '连接中...'})
+    const active = () => !this._bluetoothDisposed && this._connectionAttempt === attempt &&
+      (this._sessionGeneration || 0) === attempt.session
     wx.createBLEConnection({
-      deviceId: device.deviceId,
-      timeout: 10000,
+      deviceId: device.deviceId, timeout: 10000,
       success: () => {
-        console.log('连接成功', device.deviceId)
+        if (!active()) {
+          // A late connection to a different device must not be left open.
+          if (this.data.currentDeviceId !== device.deviceId && this._connectionAttempt?.deviceId !== device.deviceId)
+            wx.closeBLEConnection({deviceId: device.deviceId, fail: () => {}})
+          return
+        }
+        this._connectionAttempt = null
         this.applyPanelFromName(device.name || device.localName)
-        this.setData({ connected: true, currentDeviceId: device.deviceId })
+        this.setData({connected: true, currentDeviceId: device.deviceId})
         wx.hideLoading()
-        wx.showToast({ title: '连接成功', icon: 'success' })
-        this.getServices(device.deviceId)
+        wx.showToast({title: '连接成功', icon: 'success'})
         this.onConnectionClose()
+        this.getServices(device.deviceId, attempt.session)
       },
-      fail: (err) => {
-        console.error('连接失败', err)
+      fail: err => {
+        if (!active()) return
+        this._connectionAttempt = null
         wx.hideLoading()
-        let errorMsg = '连接失败'
-        if (err.errCode === 10003) errorMsg = '连接超时'
-        else if (err.errCode === 10012) errorMsg = '连接超时，请靠近设备'
-        wx.showToast({ title: errorMsg, icon: 'none' })
+        wx.showToast({title: err.errCode === 10003 || err.errCode === 10012 ? '连接超时，请靠近设备' : '连接失败', icon: 'none'})
       }
     })
   },
@@ -410,6 +437,7 @@ Page({
     if (this._connStateListenerRegistered) return
     this._connStateListenerRegistered = true
     this.registerBluetoothListener('BLEConnectionStateChange', (res) => {
+      if (!this.data.currentDeviceId || res.deviceId !== this.data.currentDeviceId) return
       if (!res.connected) {
         this.resetSessionState()
         this.setData({
@@ -423,16 +451,19 @@ Page({
 
   /* Service discovery is only here to locate the write characteristic — the
    * full list is not something the UI needs. */
-  getServices(deviceId) {
+  getServices(deviceId, session = this._sessionGeneration || 0) {
+    if (!this.connectionSessionActive(deviceId, session)) return
     wx.getBLEDeviceServices({
       deviceId: deviceId,
       success: (res) => {
+        if (!this.connectionSessionActive(deviceId, session)) return
         console.log('获取服务成功', res)
         let completedCount = 0
         const totalServices = res.services.length
 
         res.services.forEach((service) => {
           this.getCharacteristics(deviceId, service.uuid, (charResult) => {
+            if (!this.connectionSessionActive(deviceId, session)) return
             completedCount++
 
             // 查找目标特征值 (0xABF0 服务 + 0xABF1 特征值)
@@ -449,16 +480,16 @@ Page({
                     writeCharacteristicId: ch.uuid
                   })
                   // 启用 notify 以接收 ACK（直接传 serviceId，避免 setData 异步问题）
-                  this.enableNotify(deviceId, service.uuid, ch.uuid)
+                  this.enableNotify(deviceId, service.uuid, ch.uuid, session)
                 }
               })
             }
 
             if (completedCount === totalServices) {
               // 服务发现完后再协商 MTU（此时才能成功）
-              this.negotiateMTU(deviceId)
+              this.negotiateMTU(deviceId, 0, session)
             }
-          })
+          }, session)
         })
       },
       fail: (err) => console.error('获取服务失败', err)
@@ -468,7 +499,8 @@ Page({
   /**
    * 启用 notify 接收 ACK
    */
-  enableNotify(deviceId, serviceId, characteristicId) {
+  enableNotify(deviceId, serviceId, characteristicId, session = this._sessionGeneration || 0) {
+    if (!this.connectionSessionActive(deviceId, session)) return
     // 先存储 serviceId，setData 是异步的这里必须直接传参
     wx.notifyBLECharacteristicValueChange({
       deviceId: deviceId,
@@ -476,11 +508,11 @@ Page({
       characteristicId: characteristicId,
       state: true,
       success: () => {
-        if (this._bluetoothDisposed) return
+        if (!this.connectionSessionActive(deviceId, session)) return
         console.log('Notify 已启用')
         this.setData({ notifyEnabled: true })
         // Query slideshow state after connection
-        setTimeout(() => this.querySlideshowState(), 300)
+        this.scheduleConnectionTask(deviceId, session, () => this.querySlideshowState(), 300)
 
         // 只注册一次：重复注册会让同一条通知被投递 N 次，文件列表分片
         // 会被重复追加而解析错乱（列表超过 19 张时就会跨多个通知）。
@@ -563,7 +595,8 @@ Page({
   /**
    * MTU 协商（必须在服务发现完成后调用，带重试）
    */
-  negotiateMTU(deviceId, retryCount = 0) {
+  negotiateMTU(deviceId, retryCount = 0, session = this._sessionGeneration || 0) {
+    if (!this.connectionSessionActive(deviceId, session)) return
     const maxRetry = 3
     console.log('MTU协商... (第' + (retryCount + 1) + '次)')
 
@@ -578,6 +611,7 @@ Page({
       deviceId: deviceId,
       mtu: 512,
       success: (res) => {
+        if (!this.connectionSessionActive(deviceId, session)) return
         const mtu = res.mtu
         console.log('MTU协商成功:', mtu)
         if (mtu && mtu > 23) {
@@ -585,16 +619,17 @@ Page({
           wx.showToast({ title: '高速模式 MTU=' + mtu, icon: 'success', duration: 2000 })
         } else if (retryCount < maxRetry) {
           console.log('MTU偏低, 500ms后重试...')
-          setTimeout(() => this.negotiateMTU(deviceId, retryCount + 1), 500)
+          this.scheduleConnectionTask(deviceId, session, () => this.negotiateMTU(deviceId, retryCount + 1, session), 500)
         } else {
           this.setData({ mtu: 20 })
         }
       },
       fail: (err) => {
+        if (!this.connectionSessionActive(deviceId, session)) return
         console.error('MTU协商失败:', JSON.stringify(err))
         if (retryCount < maxRetry) {
           console.log('500ms后重试...')
-          setTimeout(() => this.negotiateMTU(deviceId, retryCount + 1), 500)
+          this.scheduleConnectionTask(deviceId, session, () => this.negotiateMTU(deviceId, retryCount + 1, session), 500)
         } else {
           this.setData({ mtu: 20 })
           wx.showToast({ title: 'MTU协商失败, 速度较慢', icon: 'none' })
@@ -603,11 +638,13 @@ Page({
     })
   },
 
-  getCharacteristics(deviceId, serviceId, callback) {
+  getCharacteristics(deviceId, serviceId, callback, session = this._sessionGeneration || 0) {
+    if (!this.connectionSessionActive(deviceId, session)) return
     wx.getBLEDeviceCharacteristics({
       deviceId: deviceId,
       serviceId: serviceId,
       success: (res) => {
+        if (!this.connectionSessionActive(deviceId, session)) return
         const characteristics = res.characteristics.map(char => ({
           uuid: char.uuid,
           properties: char.properties
@@ -615,6 +652,7 @@ Page({
         callback(characteristics)
       },
       fail: (err) => {
+        if (!this.connectionSessionActive(deviceId, session)) return
         console.error('获取特征值失败', err)
         callback([])
       }
@@ -622,16 +660,16 @@ Page({
   },
 
   disconnect() {
-    if (!this.data.currentDeviceId) return
+    const deviceId = this.data.currentDeviceId || this._connectionAttempt?.deviceId
+    this.resetSessionState()
+    const session = this._sessionGeneration || 0
+    this.setData({connected: false, currentDeviceId: '', notifyEnabled: false, writeServiceId: '', writeCharacteristicId: '', mtu: 23})
+    if (!deviceId) return
     wx.closeBLEConnection({
-      deviceId: this.data.currentDeviceId,
+      deviceId,
       success: () => {
-        this.resetSessionState()
-        this.setData({
-          connected: false,
-          currentDeviceId: '',
-        })
-        wx.showToast({ title: '已断开连接', icon: 'success' })
+        if (!this._bluetoothDisposed && (this._sessionGeneration || 0) === session)
+          wx.showToast({title: '已断开连接', icon: 'success'})
       }
     })
   },
@@ -641,7 +679,7 @@ Page({
     this._adapterInitialized = false
     this._bluetoothOpening = false
     if (this.data.searching) this.stopSearch()
-    if (this.data.connected) this.disconnect()
+    this.disconnect()
     wx.closeBluetoothAdapter({
       success: () => {
         this.setData({ bluetoothReady: false, devices: [] })
@@ -1182,7 +1220,7 @@ Page({
       wx.showToast({ title: '未找到目标特征值(0xABF1)', icon: 'none' })
       return
     }
-    if (this.data.sending || this._deletePending || this._selectOperation) {
+    if (this.data.sending || this._deletePending || this._selectOperation || this._slideshowOperation) {
       wx.showToast({ title: '正在发送中...', icon: 'none' })
       return
     }
@@ -1195,7 +1233,7 @@ Page({
 
     // Rendering above yields: selection or another upload may have started.
     if (!this.data.connected || this._bluetoothDisposed) return
-    if (this.data.sending || this._deletePending || this._selectOperation || this.data.loadingFiles) {
+    if (this.data.sending || this._deletePending || this._selectOperation || this._slideshowOperation || this.data.loadingFiles) {
       wx.showToast({ title: '请等待当前操作完成', icon: 'none' })
       return
     }
@@ -1436,7 +1474,7 @@ Page({
    * 请求文件列表 (CMD_FILE_LIST = 0x10)，分页拉取到收满为止。
    */
   requestFileList() {
-    if (this.data.sending || this._deletePending || this._selectOperation || this.data.loadingFiles) return
+    if (this.data.sending || this._deletePending || this._selectOperation || this._slideshowOperation || this.data.loadingFiles) return
     if (!this.data.connected) {
       wx.showToast({ title: '请先连接设备', icon: 'none' })
       return
@@ -1501,12 +1539,15 @@ Page({
   deleteImage(e) {
     const stem = e.currentTarget.dataset.stem
     if (!this.data.connected) return
+    const deleteSession = this._sessionGeneration || 0
+    const deleteDevice = this.data.currentDeviceId
 
     wx.showModal({
       title: '确认删除',
       content: '确定要删除 ' + this.stemToLabel(stem) + ' 吗？',
       success: (res) => {
-        if (!res.confirm) return
+        if (!res.confirm || (this._sessionGeneration || 0) !== deleteSession ||
+            this.data.currentDeviceId !== deleteDevice || !this.data.connected) return
 
         const cmd = new Uint8Array(1 + STEM_FIELD)
         cmd[0] = 0x11
@@ -1514,13 +1555,14 @@ Page({
         const ab = cmd.buffer.slice(cmd.byteOffset, cmd.byteOffset + cmd.byteLength)
 
         // A successful BLE write only confirms delivery, not deletion.
-        if (this.data.sending || this.data.loadingFiles || this._deletePending || this._selectOperation) {
+        if (this.data.sending || this.data.loadingFiles || this._deletePending || this._selectOperation || this._slideshowOperation) {
           wx.showToast({ title: '请等待当前操作完成', icon: 'none' })
           return
         }
         const session = this._sessionGeneration || 0
         this._deletePending = true
         const ackPromise = this.waitForAck(0x01, 8000)
+        const deleteWaiter = this._ackWaiters[0x01]
         wx.writeBLECharacteristicValue({
           writeType: 'write',
           deviceId: this.data.currentDeviceId,
@@ -1529,8 +1571,9 @@ Page({
           value: ab,
           success: async () => {
             const ack = await ackPromise
+            if ((this._sessionGeneration || 0) !== session ||
+                this.data.currentDeviceId !== deleteDevice || !this.data.connected) return
             this._deletePending = false
-            if ((this._sessionGeneration || 0) !== session || !this.data.connected) return
             if (!ack.responded) {
               wx.showToast({ title: '删除未获确认，请重试', icon: 'none' })
             } else if (!ack.ok) {
@@ -1542,8 +1585,9 @@ Page({
             }
           },
           fail: () => {
+            if ((this._sessionGeneration || 0) !== session || this.data.currentDeviceId !== deleteDevice) return
             const waiter = this._ackWaiters && this._ackWaiters[0x01]
-            if (waiter) {
+            if (waiter && waiter === deleteWaiter) {
               clearTimeout(waiter.timer)
               delete this._ackWaiters[0x01]
               waiter.resolve({ responded: false, ok: false })
@@ -1579,7 +1623,7 @@ Page({
    */
   selectImage(e) {
     if (!this.data.connected || this._bluetoothDisposed) return
-    if (this.data.sending || this.data.loadingFiles || this._deletePending || this._selectOperation) {
+    if (this.data.sending || this.data.loadingFiles || this._deletePending || this._selectOperation || this._slideshowOperation) {
       wx.showToast({ title: '请等待当前操作完成', icon: 'none' })
       return
     }
@@ -1818,8 +1862,17 @@ Page({
    * 重新连接后应该还能直接发送。
    */
   resetSessionState() {
+    this._connectionAttempt = null
+    for (const timer of this._connectionTimers || []) clearTimeout(timer)
+    this._connectionTimers = new Set()
+    const notify = this._bluetoothListeners?.BLECharacteristicValueChange
+    if (notify && typeof wx.offBLECharacteristicValueChange === 'function') wx.offBLECharacteristicValueChange(notify)
+    if (this._bluetoothListeners) delete this._bluetoothListeners.BLECharacteristicValueChange
+    this._notifyListenerRegistered = false
+    this.setData({notifyEnabled: false, mtu: 23})
     this._sessionGeneration = (this._sessionGeneration || 0) + 1
     this.cancelSelect()
+    this.cancelSlideshow()
     this._deletePending = false
     this._dataAckFailure = null
     this._writeNoResponseSupported = false
@@ -2242,7 +2295,7 @@ Page({
    * 查询轮播状态 (CMD_SLIDESHOW_STATE = 0x14)
    */
   querySlideshowState() {
-    if (!this.data.connected) return
+    if (!this.slideshowChannelAvailable() || this._slideshowOperation) return
     const deviceId = this.data.currentDeviceId
     const serviceId = this.data.writeServiceId
     const charId = this.data.writeCharacteristicId
@@ -2270,61 +2323,90 @@ Page({
    * 逐条发送会让中间那些被静默丢弃 —— 界面显示的和设备实际执行的就分叉了。
    * 用户要的只是最后那个值。
    */
-  queueSlideshowConfig() {
-    if (this._slideshowTimer) {
-      clearTimeout(this._slideshowTimer)
+  slideshowChannelAvailable() {
+    return this.data.connected && !this._bluetoothDisposed && !this.data.sending &&
+      !this.data.loadingFiles && !this._deletePending && !this._selectOperation
+  },
+
+  slideshowOperationActive(operation) {
+    return !!operation && this._slideshowOperation === operation &&
+      operation.session === (this._sessionGeneration || 0) &&
+      operation.deviceId === this.data.currentDeviceId && this.slideshowChannelAvailable()
+  },
+
+  cancelSlideshow() {
+    const operation = this._slideshowOperation
+    this._slideshowOperation = null
+    if (this._slideshowTimer) clearTimeout(this._slideshowTimer)
+    this._slideshowTimer = null
+    if (!operation) return
+    if (operation.timer !== null) clearTimeout(operation.timer)
+    const waiter = operation.waiter
+    if (waiter && this._ackWaiters && this._ackWaiters[0x03] === waiter) {
+      clearTimeout(waiter.timer)
+      delete this._ackWaiters[0x03]
+      waiter.resolve({ responded: false, ok: false })
     }
-    this._slideshowTimer = setTimeout(() => {
-      this._slideshowTimer = null
-      this.sendSlideshowConfig(this.data.slideshowEnabled,
-                               this.data.slideshowInterval)
+  },
+
+  queueSlideshowConfig() {
+    if (!this.slideshowChannelAvailable() || this._slideshowOperation?.inFlight) return
+    this.cancelSlideshow()
+    const operation = {
+      session: this._sessionGeneration || 0,
+      deviceId: this.data.currentDeviceId,
+      enabled: this.data.slideshowEnabled,
+      interval: this.data.slideshowInterval,
+      timer: null, waiter: null, inFlight: false
+    }
+    this._slideshowOperation = operation
+    operation.timer = setTimeout(() => {
+      operation.timer = null
+      this.sendSlideshowConfig(operation.enabled, operation.interval, 0, operation)
     }, SLIDESHOW_DEBOUNCE_MS)
   },
 
-  sendSlideshowConfig(enabled, interval, attempt) {
-    if (!this.data.connected) return
-    const deviceId = this.data.currentDeviceId
+  sendSlideshowConfig(enabled, interval, attempt = 0, operation = this._slideshowOperation) {
+    if (!operation) {
+      if (!this.slideshowChannelAvailable()) return
+      operation = {session: this._sessionGeneration || 0, deviceId: this.data.currentDeviceId,
+        enabled, interval, timer: null, waiter: null, inFlight: false}
+      this._slideshowOperation = operation
+    }
+    if (!this.slideshowOperationActive(operation)) {
+      if (this._slideshowOperation === operation) this.cancelSlideshow()
+      return
+    }
     const serviceId = this.data.writeServiceId
     const charId = this.data.writeCharacteristicId
-    if (!serviceId || !charId) return
-
-    const tryNumber = attempt || 0
-    const cmd = new Uint8Array(4)
-    cmd[0] = 0x13
-    cmd[1] = enabled ? 1 : 0
-    cmd[2] = interval & 0xFF
-    cmd[3] = (interval >> 8) & 0xFF
-    const ab = cmd.buffer.slice(cmd.byteOffset, cmd.byteOffset + cmd.byteLength)
-
-    // 必须等应答：被限流时设备回 status=2 并丢弃这条命令，
-    // 不看应答的话界面会停在一个设备并不认的值上。
+    if (!serviceId || !charId) { this.cancelSlideshow(); return }
+    operation.inFlight = true
+    const cmd = new Uint8Array([0x13, enabled ? 1 : 0, interval & 0xFF, (interval >> 8) & 0xFF])
     const ackPromise = this.waitForAck(0x03, 3000)
-
+    operation.waiter = this._ackWaiters[0x03]
     wx.writeBLECharacteristicValue({
-      writeType: 'write',
-      deviceId, serviceId, characteristicId: charId,
-      value: ab,
-      success: () => console.log('SLIDESHOW_CTRL 已发送: enabled=' + enabled +
-                                 ' interval=' + interval + ' 第' + (tryNumber + 1) + '次'),
-      fail: (err) => console.error('SLIDESHOW_CTRL 发送失败:', err)
+      writeType: 'write', deviceId: operation.deviceId,
+      serviceId, characteristicId: charId, value: cmd.buffer,
+      fail: () => {
+        if (!this.slideshowOperationActive(operation)) return
+        this.cancelSlideshow()
+        this.querySlideshowState()
+      }
     })
-
-    ackPromise.then((ack) => {
-      if (!ack.responded || ack.ok) return
-      if (ack.status !== 2) {
-        console.warn('设备拒绝了轮播设置 (status=' + ack.status + ')')
+    ackPromise.then(ack => {
+      if (!this.slideshowOperationActive(operation)) {
+        if (this._slideshowOperation === operation) this.cancelSlideshow()
         return
       }
-      // 忙 = 被限流。只在用户没有再改动的前提下重试，避免把过期值补发回去
-      const stillCurrent = this.data.slideshowEnabled === enabled &&
-                           this.data.slideshowInterval === interval
-      if (tryNumber < SLIDESHOW_MAX_RETRIES && stillCurrent) {
-        setTimeout(() => {
-          this.sendSlideshowConfig(enabled, interval, tryNumber + 1)
+      if (ack.responded && !ack.ok && ack.status === 2 && attempt < SLIDESHOW_MAX_RETRIES) {
+        operation.timer = setTimeout(() => {
+          operation.timer = null
+          this.sendSlideshowConfig(enabled, interval, attempt + 1, operation)
         }, SLIDESHOW_RETRY_MS)
-      } else {
-        console.warn('轮播设置未能下发: enabled=' + enabled + ' interval=' + interval)
+        return
       }
+      this.cancelSlideshow()
+      if (!ack.responded || !ack.ok) this.querySlideshowState()
     })
   },
 
@@ -2332,6 +2414,7 @@ Page({
    * 轮播开关切换
    */
   onSlideshowToggle(e) {
+    if (!this.slideshowChannelAvailable() || this._slideshowOperation?.inFlight) return
     this.setData({ slideshowEnabled: e.detail.value })
     this.queueSlideshowConfig()
   },
@@ -2340,6 +2423,7 @@ Page({
    * 轮播间隔变化
    */
   selectInterval(e) {
+    if (!this.slideshowChannelAvailable() || this._slideshowOperation?.inFlight) return
     const seconds = parseInt(e.currentTarget.dataset.seconds)
     if (seconds === this.data.slideshowInterval) return
     this.setData({

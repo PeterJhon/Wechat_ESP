@@ -61,6 +61,8 @@ node tools/ble-delete.test.mjs
 node tools/ble-concurrency.test.mjs
 node tools/ble-reliability.test.mjs
 node tools/ble-select.test.mjs
+node tools/ble-slideshow.test.mjs
+node tools/ble-connection.test.mjs
 python tools/param_upload_test.py
 ```
 
