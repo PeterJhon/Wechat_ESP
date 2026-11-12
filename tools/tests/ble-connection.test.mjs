@@ -1,14 +1,14 @@
-﻿import assert from 'node:assert/strict'
+import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import vm from 'node:vm'
-import * as panels from '../utils/panel.js'
+import * as panels from '../../utils/panel.js'
 let definition,connects=[],services=[],chars=[],notifies=[],mtus=[],closed=[],notices=[],timers=[],listeners=[]
 const wx={showLoading(){},hideLoading(){},showToast:x=>notices.push(x),
  createBLEConnection:x=>connects.push(x),closeBLEConnection:x=>closed.push(x),
  getBLEDeviceServices:x=>services.push(x),getBLEDeviceCharacteristics:x=>chars.push(x),
  notifyBLECharacteristicValueChange:x=>notifies.push(x),setBLEMTU:x=>mtus.push(x),
  onBLEConnectionStateChange(){},onBLECharacteristicValueChange:x=>listeners.push(x),offBLECharacteristicValueChange(){}}
-vm.runInNewContext(fs.readFileSync(new URL('../pages/index/index.js',import.meta.url),'utf8').replace(/^import .*$/mg,''),{...panels,wx,Page(x){definition=x},console:{log(){},warn(){},error(){}},Uint8Array,setTimeout(f,ms){timers.push({f,ms});return timers.length},clearTimeout(){}})
+vm.runInNewContext(fs.readFileSync(new URL('../../pages/index/index.js',import.meta.url),'utf8').replace(/^import .*$/mg,''),{...panels,wx,Page(x){definition=x},console:{log(){},warn(){},error(){}},Uint8Array,setTimeout(f,ms){timers.push({f,ms});return timers.length},clearTimeout(){}})
 function page(){return Object.assign(Object.create(definition),{data:{connected:false,mtu:23},setData(x){Object.assign(this.data,x)}})}
 const event=id=>({currentTarget:{dataset:{device:{deviceId:id,name:'EINK-800-0001'}}}})
 const svc={services:[{uuid:'ABF0'}]},characteristics={characteristics:[{uuid:'ABF1',properties:{write:true,writeNoResponse:true}}]}

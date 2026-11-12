@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import vm from 'node:vm'
-import * as panels from '../utils/panel.js'
+import * as panels from '../../utils/panel.js'
 let definition, writes=0
 const listeners=new Map(), removed=[]
 const wx={writeBLECharacteristicValue(x){writes++;x.success()},showToast(){}}
@@ -10,7 +10,7 @@ for(const name of names){
  wx['on'+name]=f=>{if(!listeners.has(name))listeners.set(name,new Set());listeners.get(name).add(f)}
  wx['off'+name]=f=>{removed.push(f);listeners.get(name)?.delete(f)}
 }
-vm.runInNewContext(fs.readFileSync(new URL('../pages/index/index.js',import.meta.url),'utf8').replace(/^import .*$/mg,''),{...panels,wx,Page(x){definition=x},console:{log(){},warn(){},error(){}},setTimeout,clearTimeout,Uint8Array})
+vm.runInNewContext(fs.readFileSync(new URL('../../pages/index/index.js',import.meta.url),'utf8').replace(/^import .*$/mg,''),{...panels,wx,Page(x){definition=x},console:{log(){},warn(){},error(){}},setTimeout,clearTimeout,Uint8Array})
 function page(){return Object.assign(Object.create(definition),{data:{connected:true,currentDeviceId:'d',renderedCount:2},_thumbGeneration:0,setData(){},thumbPath:x=>x})}
 const tick=()=>new Promise(r=>setImmediate(r))
 // Refresh cannot interleave list bytes with a pending delete acknowledgement.

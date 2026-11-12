@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
-import { panelForTag, parsePanel, panelBytes, panelWireBytes, cropOptionsFor } from '../utils/panel.js'
-import { packToWire } from '../utils/epd-wire.js'
+import { panelForTag, parsePanel, panelBytes, panelWireBytes, cropOptionsFor } from '../../utils/panel.js'
+import { packToWire } from '../../utils/epd-wire.js'
 
 for (const [tag, width, height, bytes, packed, algorithm] of [
   ['800', 800, 480, 384000, 144000, 'hybrid'],

@@ -1,11 +1,11 @@
-﻿import assert from 'node:assert/strict'
+import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import vm from 'node:vm'
-import * as panels from '../utils/panel.js'
+import * as panels from '../../utils/panel.js'
 let definition,writes=[],timerId=0,failWrite=false
 const timers=new Map()
 const wx={showToast(){},writeBLECharacteristicValue(x){writes.push(x);if(failWrite)x.fail({errCode:10008})}}
-vm.runInNewContext(fs.readFileSync(new URL('../pages/index/index.js',import.meta.url),'utf8').replace(/^import .*$/mg,''),{...panels,wx,Page(x){definition=x},console:{log(){},warn(){},error(){}},Uint8Array,setTimeout(f,ms){const id=++timerId;timers.set(id,{f,ms});return id},clearTimeout:id=>timers.delete(id)})
+vm.runInNewContext(fs.readFileSync(new URL('../../pages/index/index.js',import.meta.url),'utf8').replace(/^import .*$/mg,''),{...panels,wx,Page(x){definition=x},console:{log(){},warn(){},error(){}},Uint8Array,setTimeout(f,ms){const id=++timerId;timers.set(id,{f,ms});return id},clearTimeout:id=>timers.delete(id)})
 function page(){return Object.assign(Object.create(definition),{data:{connected:true,currentDeviceId:'A',writeServiceId:'s',writeCharacteristicId:'c',imageSrc:'x',slideshowEnabled:true,slideshowInterval:60},setData(x){Object.assign(this.data,x)},ensureFullResolution(){throw Error('Upload should be blocked')}})}
 const tick=()=>new Promise(r=>setImmediate(r))
 function ack(p,status){let w=p._ackWaiters[3];timers.delete(w.timer);delete p._ackWaiters[3];w.resolve({responded:true,ok:status===0,status})}

@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import vm from 'node:vm'
-import * as panels from '../utils/panel.js'
-import { packToWire } from '../utils/epd-wire.js'
+import * as panels from '../../utils/panel.js'
+import { packToWire } from '../../utils/epd-wire.js'
 let definition, messages=[], writes=[]
 const wx={hideToast(){},showToast(x){messages.push(x)},showModal(x){messages.push(x)},
   writeBLECharacteristicValue(x){writes.push(new Uint8Array(x.value)[0]);x.success()}}
 const sandbox={...panels,packToWire,wx,Page(x){definition=x},console:{log(){},warn(){},error(){}},setTimeout,clearTimeout,Uint8Array,ArrayBuffer}
-vm.runInNewContext(fs.readFileSync(new URL('../pages/index/index.js',import.meta.url),'utf8').replace(/^import .*$/mg,''),sandbox)
+vm.runInNewContext(fs.readFileSync(new URL('../../pages/index/index.js',import.meta.url),'utf8').replace(/^import .*$/mg,''),sandbox)
 function page(){return Object.assign(Object.create(definition),{data:{connected:true,imageSrc:'test',writeServiceId:'s',writeCharacteristicId:'c',currentDeviceId:'d',mtu:23},setData(x){Object.assign(this.data,x)},processedBinary:new Uint8Array(8).buffer,_panel:{width:8,height:1},ensureFullResolution:async()=>true,makeStem:()=> '20261112-000000-000',buildPreviewJpeg:async()=>null,sleep:async()=>{}})}
 let p=page(), pending=p.waitForAck(1,5000)
 p.resetSessionState()

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { ParamUploader, STEM_FIELD, makeStem, parsePanelTag,
-         readStemField, writeStemField } from './param-uploader.js'
+         readStemField, writeStemField } from '../param-uploader.js'
 
 class EventHub {
   constructor() { this.listeners = new Map() }

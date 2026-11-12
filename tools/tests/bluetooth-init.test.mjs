@@ -1,7 +1,7 @@
-﻿import assert from 'node:assert/strict'
+import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import vm from 'node:vm'
-import * as panels from '../utils/panel.js'
+import * as panels from '../../utils/panel.js'
 let definition, opening, calls=[]
 const wx={
  openBluetoothAdapter(x){calls.push('open');opening=x},
@@ -10,7 +10,7 @@ const wx={
  closeBluetoothAdapter(x){calls.push('close');x.success()},
  showToast(){},showModal(){}
 }
-vm.runInNewContext(fs.readFileSync(new URL('../pages/index/index.js',import.meta.url),'utf8').replace(/^import .*$/mg,''),{...panels,wx,Page(x){definition=x},console:{log(){},warn(){},error(){}},setTimeout,clearTimeout})
+vm.runInNewContext(fs.readFileSync(new URL('../../pages/index/index.js',import.meta.url),'utf8').replace(/^import .*$/mg,''),{...panels,wx,Page(x){definition=x},console:{log(){},warn(){},error(){}},setTimeout,clearTimeout})
 const page=()=>Object.assign(Object.create(definition),{data:{},setData(x){Object.assign(this.data,x)}})
 let p=page();p.onLoad();p.checkBluetooth();p.initBluetooth()
 assert.deepEqual(calls,['open'])

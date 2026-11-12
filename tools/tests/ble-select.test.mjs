@@ -1,11 +1,11 @@
-﻿import assert from 'node:assert/strict'
+import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import vm from 'node:vm'
-import * as panels from '../utils/panel.js'
+import * as panels from '../../utils/panel.js'
 let definition,writes=[],notices=[],failWrite=false,timerId=0
 const timers=new Map()
 const wx={showToast:x=>notices.push(x),writeBLECharacteristicValue(x){writes.push(x);if(failWrite)x.fail({errCode:10008})}}
-vm.runInNewContext(fs.readFileSync(new URL('../pages/index/index.js',import.meta.url),'utf8').replace(/^import .*$/mg,''),{...panels,wx,Page(x){definition=x},console:{log(){},warn(){},error(){}},Uint8Array,setTimeout(f,delay){const id=++timerId;timers.set(id,{f,delay});return id},clearTimeout:id=>timers.delete(id)})
+vm.runInNewContext(fs.readFileSync(new URL('../../pages/index/index.js',import.meta.url),'utf8').replace(/^import .*$/mg,''),{...panels,wx,Page(x){definition=x},console:{log(){},warn(){},error(){}},Uint8Array,setTimeout(f,delay){const id=++timerId;timers.set(id,{f,delay});return id},clearTimeout:id=>timers.delete(id)})
 function page(){return Object.assign(Object.create(definition),{data:{connected:true,currentDeviceId:'a',writeServiceId:'s',writeCharacteristicId:'c',imageSrc:'x'},setData(x){Object.assign(this.data,x)},ensureFullResolution(){throw Error('Upload must be blocked during selection')}})}
 const event={currentTarget:{dataset:{stem:'20261112-000000-000'}}}
 const tick=()=>new Promise(r=>setImmediate(r))

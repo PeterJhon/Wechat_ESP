@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
-import { convertImage } from '../utils/epd-helper.js'
-import { panelForTag } from '../utils/panel.js'
+import { convertImage } from '../../utils/epd-helper.js'
+import { panelForTag } from '../../utils/panel.js'
 
 let drawn
 globalThis.wx = {

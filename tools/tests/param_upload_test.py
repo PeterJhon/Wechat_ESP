@@ -1,7 +1,7 @@
 """param_upload.py 的假设备测试。
 
 跑：
-    python tools/param_upload_test.py
+    python tools/tests/param_upload_test.py
 
 不碰真蓝牙：FakeLink 按固件 main/ble_task.c 的应答规则回包，重点验证
 3bit 压包、命令/应答节奏、同名换名和缩略图旁挂。
@@ -12,6 +12,9 @@ import random
 import tempfile
 import unittest
 from pathlib import Path
+
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import param_upload as pu
 
