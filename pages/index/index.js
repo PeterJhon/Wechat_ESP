@@ -1826,23 +1826,27 @@ Page({
    * 缩略图缓存键就是文件名：stem 全局唯一且不会被复用，
    * 所以不需要再靠字节数之类的近似辨析符。
    */
+  thumbnailPrefix() {
+    return `${THUMB_PREFIX}${encodeURIComponent(this.data.currentDeviceId || 'unknown')}_`
+  },
 
-  thumbPath(stem) {
-    return `${wx.env.USER_DATA_PATH}/${THUMB_PREFIX}${stem}.jpg`
+  thumbPath(stem, previewSize = 0) {
+    return `${wx.env.USER_DATA_PATH}/${this.thumbnailPrefix()}${stem}_${previewSize}.jpg`
   },
 
   /**
    * 清掉不再被列表引用的缓存文件（图片被删除，或换了新预览）。
    */
   pruneThumbnailCache(files) {
+    const prefix = this.thumbnailPrefix()
     const keep = new Set(
-      files.filter(f => f.previewSize > 0).map(f => this.thumbPath(f.stem))
+      files.filter(f => f.previewSize > 0).map(f => this.thumbPath(f.stem, f.previewSize))
     )
     wx.getFileSystemManager().readdir({
       dirPath: wx.env.USER_DATA_PATH,
       success: (res) => {
         res.files
-          .filter(name => name.startsWith(THUMB_PREFIX) && name.endsWith('.jpg'))
+          .filter(name => name.startsWith(prefix) && name.endsWith('.jpg'))
           .forEach(name => {
             const full = `${wx.env.USER_DATA_PATH}/${name}`
             if (keep.has(full)) return
@@ -1891,7 +1895,7 @@ Page({
     for (const file of targets) {
       if (!current()) return
 
-      const path = this.thumbPath(file.stem)
+      const path = this.thumbPath(file.stem, file.previewSize)
       const cached = await this.fileExists(path)
       if (!current()) return
       if (cached) {

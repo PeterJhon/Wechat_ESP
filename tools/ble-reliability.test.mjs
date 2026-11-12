@@ -18,7 +18,7 @@ for(const failure of [false,true]){
  if(failure){assert.equal(data.length,1);assert(!packets.some(x=>x[0]===3));assert.equal(packets.at(-1)[0],4);assert(!notices.some(x=>x.icon==='success'))}
  else{assert.equal(data.reduce((sum,x)=>sum+x.length-1,0),300);assert(notices.some(x=>x.icon==='success'))}
 }
-let p
+let p=page();const first=p.thumbPath('same',10);p.data.currentDeviceId='other';assert.notEqual(p.thumbPath('same',10),first);assert.notEqual(p.thumbPath('same',11),p.thumbPath('same',10))
 console.log('PASS: acknowledged writes, bounded packets, complete payload, stop on DATA rejection, device-specific cache keys')
 
 failData=false;packets=[];modes=[];notices=[]
