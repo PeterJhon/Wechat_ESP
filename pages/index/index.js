@@ -2,6 +2,9 @@
 import { convertToEPD, colorCodesToBinary, colorCodesToImageData } from '../../utils/epd-converter.js'
 import { PANEL_PROFILES, DEFAULT_PANEL_TAG, parsePanel, cropOptionsFor, panelBytes } from '../../utils/panel.js'
 import { packToWire } from '../../utils/epd-wire.js'
+import { FirmwareUpdater } from '../../utils/firmware-updates.js'
+import { FIRMWARE_MANIFEST_URL } from '../../config/firmware.js'
+import { BleFirmwareSender } from '../../utils/ble-ota.js'
 
 // 扫描时只认广播名带这个前缀的设备（固件用 BLE_DEVICE_NAME = "EINK-xxxx"）
 const DEVICE_NAME_PREFIX = 'EINK-'
@@ -130,6 +133,23 @@ Page({
     slideshowEnabled: false,
     slideshowInterval: 30,
     slideshowLabel: '30 秒',
+    wifiEnabled: false,
+    wifiKnown: false,
+    wifiBusy: false,
+    wifiStatus: '正在读取 Wi-Fi 设置…',
+    firmwareCurrent: '',
+    firmwareLatest: '',
+    firmwareStatus: '连接后自动检查固件更新',
+    firmwareBusy: false,
+    firmwareAvailable: false,
+    firmwareDownloaded: false,
+    firmwareProgress: 0,
+    firmwareSize: '',
+    firmwareBleSupported: false,
+    firmwareConfirmed: false,
+    firmwareInstalling: false,
+    firmwareCommitting: false,
+    firmwareInstallProgress: 0,
     intervalPresets: [
       { label: '10 秒', seconds: 10 },
       { label: '30 秒', seconds: 30 },
@@ -168,6 +188,8 @@ Page({
 
   onShow() {
     this._pageHidden = false
+    if (this._firmwareUpdater && Date.now() - (this._firmwareLastCheck || 0) > 21600000)
+      this.checkFirmwareUpdates()
     if (this._adapterInitialized) this.checkBluetooth()
     if (this.data.connected && this.data.notifyEnabled && this.data.filesLoaded &&
         !this.data.sending && !this.data.loadingFiles) this.loadThumbnails(this.data.visibleFiles)
@@ -187,6 +209,7 @@ Page({
 
   onHide() {
     this._pageHidden = true
+    if (this._bleOta && !this._bleOta.committing) this._bleOta.cancel()
     if (this.data.searching) this.stopSearch()
     this._thumbGeneration = (this._thumbGeneration || 0) + 1
     if (this._previewPending) this._previewPending.reject(new Error('Page hidden'))
@@ -454,7 +477,7 @@ Page({
     }
     if (this._bluetoothDisposed || (this.data.connected && this.data.currentDeviceId === device.deviceId)) return
     if (this._connectionAttempt?.deviceId === device.deviceId) return
-    if (this.data.sending || this.data.loadingFiles || this._deletePending || this._selectOperation || this._slideshowOperation) {
+    if (this.data.sending || this.data.loadingFiles || this._deletePending || this._selectOperation || this._slideshowOperation || this._wifiOperation || this._deviceInfoOperation || this._bleOta) {
       wx.showToast({ title: '请等待当前操作完成', icon: 'none' })
       return
     }
@@ -612,6 +635,8 @@ Page({
         this.setData({ notifyEnabled: true })
         // Query slideshow state after connection
         this.scheduleConnectionTask(deviceId, session, () => this.querySlideshowState(), 300)
+        this.scheduleConnectionTask(deviceId, session, () => this.queryWifiState(), 600)
+        this.scheduleConnectionTask(deviceId, session, () => this.queryFirmwareInfo(), 900)
 
         // 只注册一次：重复注册会让同一条通知被投递 N 次，文件列表分片
         // 会被重复追加而解析错乱（列表超过 19 张时就会跨多个通知）。
@@ -669,6 +694,19 @@ Page({
           // 文件列表（0x10）：首片开启一个会话
           if (buf.length >= 2 && buf[0] === 0x10) {
             this.beginFileList(buf)
+            return
+          }
+
+          if (buf.length === 7 && buf[0] === 0x35) {
+            this._bleOta?.receive(buf)
+            return
+          }
+          if ((buf.length === 8 || buf.length === 10) && buf[0] === 0x19) {
+            this.handleFirmwareInfo(buf)
+            return
+          }
+          if (buf.length === 5 && buf[0] === 0x18) {
+            this.handleWifiState(buf)
             return
           }
 
@@ -1324,7 +1362,7 @@ Page({
       wx.showToast({ title: '未找到目标特征值(0xABF1)', icon: 'none' })
       return
     }
-    if (this.data.sending || this._deletePending || this._selectOperation || this._slideshowOperation) {
+    if (this.data.sending || this._deletePending || this._selectOperation || this._slideshowOperation || this._wifiOperation || this._deviceInfoOperation || this._bleOta) {
       wx.showToast({ title: '正在发送中...', icon: 'none' })
       return
     }
@@ -1337,7 +1375,7 @@ Page({
 
     // Rendering above yields: selection or another upload may have started.
     if (!this.data.connected || this._bluetoothDisposed) return
-    if (this.data.sending || this._deletePending || this._selectOperation || this._slideshowOperation || this.data.loadingFiles) {
+    if (this.data.sending || this._deletePending || this._selectOperation || this._slideshowOperation || this._wifiOperation || this._deviceInfoOperation || this._bleOta || this.data.loadingFiles) {
       wx.showToast({ title: '请等待当前操作完成', icon: 'none' })
       return
     }
@@ -1578,7 +1616,7 @@ Page({
    * 请求文件列表 (CMD_FILE_LIST = 0x10)，分页拉取到收满为止。
    */
   requestFileList(options = {}) {
-    if (this.data.sending || this._deletePending || this._selectOperation || this._slideshowOperation || this.data.loadingFiles) return
+    if (this.data.sending || this._deletePending || this._selectOperation || this._slideshowOperation || this._wifiOperation || this._deviceInfoOperation || this._bleOta || this.data.loadingFiles) return
     if (!this.data.connected) {
       wx.showToast({ title: '请先连接设备', icon: 'none' })
       return
@@ -1673,7 +1711,7 @@ Page({
         const ab = cmd.buffer.slice(cmd.byteOffset, cmd.byteOffset + cmd.byteLength)
 
         // A successful BLE write only confirms delivery, not deletion.
-        if (this.data.sending || this.data.loadingFiles || this._deletePending || this._selectOperation || this._slideshowOperation) {
+        if (this.data.sending || this.data.loadingFiles || this._deletePending || this._selectOperation || this._slideshowOperation || this._wifiOperation || this._deviceInfoOperation || this._bleOta) {
           wx.showToast({ title: '请等待当前操作完成', icon: 'none' })
           return
         }
@@ -1741,7 +1779,7 @@ Page({
    */
   selectImage(e) {
     if (!this.data.connected || this._bluetoothDisposed) return
-    if (this.data.sending || this.data.loadingFiles || this._deletePending || this._selectOperation || this._slideshowOperation) {
+    if (this.data.sending || this.data.loadingFiles || this._deletePending || this._selectOperation || this._slideshowOperation || this._wifiOperation || this._deviceInfoOperation || this._bleOta) {
       wx.showToast({ title: '请等待当前操作完成', icon: 'none' })
       return
     }
@@ -1966,6 +2004,8 @@ Page({
     this.pruneThumbnailCache(files)
     // The initial state query may have been deferred by a long file list.
     this.querySlideshowState()
+    this.queryWifiState()
+    this.queryFirmwareInfo()
     this.loadThumbnails(this.data.visibleFiles)
   },
 
@@ -2043,6 +2083,10 @@ Page({
     this._sessionGeneration = (this._sessionGeneration || 0) + 1
     this.cancelSelect()
     this.cancelSlideshow()
+    this.cancelWifi()
+    this.cancelFirmwareSession()
+    this.setData({wifiKnown: false, wifiEnabled: false, wifiBusy: false,
+      wifiStatus: '正在读取 Wi-Fi 设置…'})
     this._deletePending = false
     this._dataAckFailure = null
     this._writeNoResponseSupported = false
@@ -2115,7 +2159,7 @@ Page({
 
   async loadThumbnailBatch(files, generation) {
     const current = () => generation === (this._thumbGeneration || 0) &&
-      this.data.connected && !this._bluetoothDisposed && !this._pageHidden && !this.data.sending
+      this.data.connected && !this._bluetoothDisposed && !this._pageHidden && !this.data.sending && !this._bleOta
     const targets = files.filter(f => f.previewSize > 0 && !f.thumb)
     const pending = []
     let lastFlush = 0
@@ -2191,7 +2235,7 @@ Page({
   readPreview(stem, totalSize) {
     const generation = this._thumbGeneration || 0
     const active = () => generation === (this._thumbGeneration || 0) &&
-      this.data.connected && !this._bluetoothDisposed && !this._pageHidden
+      this.data.connected && !this._bluetoothDisposed && !this._pageHidden && !this._bleOta
     const buffer = new Uint8Array(totalSize)
     const deviceId = this.data.currentDeviceId
     const serviceId = this.data.writeServiceId
@@ -2467,7 +2511,7 @@ Page({
    * 查询轮播状态 (CMD_SLIDESHOW_STATE = 0x14)
    */
   querySlideshowState() {
-    if (!this.slideshowChannelAvailable() || this._slideshowOperation) return
+    if (!this.slideshowChannelAvailable() || this._slideshowOperation || this._wifiOperation || this._deviceInfoOperation || this._bleOta) return
     const deviceId = this.data.currentDeviceId
     const serviceId = this.data.writeServiceId
     const charId = this.data.writeCharacteristicId
@@ -2485,6 +2529,240 @@ Page({
     })
   },
 
+  wifiChannelAvailable() {
+    return this.data.connected && this.data.notifyEnabled && !this._bluetoothDisposed &&
+      !this.data.sending && !this.data.loadingFiles && !this._deletePending &&
+      !this._selectOperation && !this._slideshowOperation && !this._deviceInfoOperation && !this._bleOta && !this._previewPending
+  },
+
+  cancelFirmwareSession() {
+    this._bleOta?.cancel()
+    this._bleOta = null
+    if (this._deviceInfoOperation?.timer != null) clearTimeout(this._deviceInfoOperation.timer)
+    this._deviceInfoOperation = null
+    this._firmwareUpdater?.dispose()
+    this._firmwareUpdater = null
+    this.setData({firmwareCurrent: '', firmwareLatest: '', firmwareBusy: false,
+      firmwareDownloaded: false, firmwareAvailable: false, firmwareProgress: 0, firmwareSize: '',
+      firmwareBleSupported: false, firmwareConfirmed: false, firmwareInstalling: false,
+      firmwareCommitting: false, firmwareInstallProgress: 0,
+      firmwareStatus: '连接后自动检查固件更新'})
+  },
+
+  queryFirmwareInfo(attempt = 0) {
+    if (!this.data.connected || !this.data.notifyEnabled || this._deviceInfoOperation || this._bleOta ||
+        (this._firmwareUpdater && this.data.firmwareConfirmed)) return
+    const deviceId = this.data.currentDeviceId, session = this._sessionGeneration || 0
+    if (!this.wifiChannelAvailable() || this._wifiOperation || this._deviceInfoOperation || this._bleOta) {
+      if (attempt < 30) this.scheduleConnectionTask(deviceId, session,
+        () => this.queryFirmwareInfo(attempt + 1), 500)
+      return
+    }
+    const operation = {deviceId, session, timer: null}
+    this._deviceInfoOperation = operation
+    this.setData({firmwareBusy: true, firmwareStatus: '正在读取设备版本…'})
+    const failed = () => {
+      if (this._deviceInfoOperation !== operation) return
+      clearTimeout(operation.timer)
+      this._deviceInfoOperation = null
+      this.setData({firmwareBusy: false, firmwareStatus: '无法读取设备版本，请重试或先升级配套固件'})
+    }
+    operation.timer = setTimeout(failed, 4000)
+    wx.writeBLECharacteristicValue({writeType: 'write', deviceId,
+      serviceId: this.data.writeServiceId, characteristicId: this.data.writeCharacteristicId,
+      value: new Uint8Array([0x19]).buffer, success: () => {}, fail: failed})
+  },
+
+  handleFirmwareInfo(buf) {
+    const operation = this._deviceInfoOperation
+    if (!operation || !this.connectionSessionActive(operation.deviceId, operation.session) || buf[7] > 1 ||
+        (buf.length === 10 && (buf[8] > 1 || buf[9] > 1))) return
+    clearTimeout(operation.timer)
+    this._deviceInfoOperation = null
+    const version = [buf[1] | buf[2] << 8, buf[3] | buf[4] << 8, buf[5] | buf[6] << 8].join('.') + '-universal'
+    const supports = buf.length === 10 && buf[8] === 1
+    const confirmed = buf.length === 8 || buf[9] === 1
+    this.setData({firmwareCurrent: version, firmwareBusy: false,
+      firmwareBleSupported: supports, firmwareConfirmed: confirmed})
+    const pendingKey = 'eink_ota_pending_' + encodeURIComponent(operation.deviceId)
+    const expected = typeof wx.getStorageSync === 'function' ? wx.getStorageSync(pendingKey) : null
+    if (!confirmed) {
+      this.setData({firmwareStatus: '设备正在完成启动自检，稍后确认升级结果…'})
+      this.scheduleConnectionTask(operation.deviceId, operation.session, () => this.queryFirmwareInfo(), 2000)
+      return
+    }
+    if (expected?.version) {
+      wx.removeStorageSync(pendingKey)
+      wx.showModal({title: version === expected.version ? '升级成功' : '升级结果待检查',
+        content: version === expected.version ? '设备已运行 ' + version + '，启动自检通过。' :
+          '目标版本为 ' + expected.version + '，设备当前运行 ' + version + '，可能已回滚。', showCancel: false})
+    }
+    this._firmwareUpdater?.dispose()
+    this._firmwareUpdater = new FirmwareUpdater(wx, FIRMWARE_MANIFEST_URL, version, values => {
+      if (this.connectionSessionActive(operation.deviceId, operation.session)) this.setData(values)
+    })
+    this.checkFirmwareUpdates()
+  },
+
+  checkFirmwareUpdates() {
+    if (this._bleOta) return
+    if (!this._firmwareUpdater) { this.queryFirmwareInfo(); return }
+    this._firmwareLastCheck = Date.now()
+    this._firmwareUpdater.check()
+  },
+
+  cancelFirmwareDownload() {
+    this._firmwareUpdater?.cancel()
+  },
+
+  upgradeFirmware() {
+    if (!this.data.firmwareBleSupported || !this.data.firmwareConfirmed ||
+        !this.data.firmwareDownloaded || this.data.firmwareBusy || this._bleOta ||
+        !this.wifiChannelAvailable() || this._wifiOperation) {
+      wx.showToast({title: '请等待设备和当前操作就绪', icon: 'none'}); return
+    }
+    const session = this._sessionGeneration || 0, deviceId = this.data.currentDeviceId
+    const updater = this._firmwareUpdater
+    wx.showModal({title: '蓝牙升级固件',
+      content: '升级至 ' + updater.manifest.version + '。请保持设备供电和蓝牙连接，完成后设备会重启。',
+      success: async result => {
+        if (!result.confirm || !this.connectionSessionActive(deviceId, session) ||
+            this._firmwareUpdater !== updater || this._bleOta || this.data.firmwareBusy ||
+            !this.wifiChannelAvailable() || this._wifiOperation) return
+        this._thumbGeneration = (this._thumbGeneration || 0) + 1
+        const sender = new BleFirmwareSender(wx, {deviceId, serviceId: this.data.writeServiceId,
+          characteristicId: this.data.writeCharacteristicId,
+          active: () => this.connectionSessionActive(deviceId, session)},
+          values => { if (this.connectionSessionActive(deviceId, session)) this.setData(values) },
+          version => wx.setStorageSync('eink_ota_pending_' + encodeURIComponent(deviceId), {version, startedAt: Date.now()}))
+        this._bleOta = sender
+        this.setData({firmwareInstalling: true, firmwareCommitting: false, firmwareInstallProgress: 0})
+        try {
+          await sender.install(updater.path, updater.manifest, this.data.firmwareCurrent, this.data.mtu)
+        } catch (error) {
+          if (this.connectionSessionActive(deviceId, session)) this.setData({firmwareStatus:
+            sender.committing ? '升级提交结果待确认，请在设备重启后重新连接' : error.message})
+        } finally {
+          if (this._bleOta === sender) {
+            if (!sender.committing) this._bleOta = null
+            this.setData({firmwareInstalling: false, firmwareCommitting: sender.committing})
+          }
+        }
+      }
+    })
+  },
+
+  cancelBleUpgrade() {
+    if (this._bleOta && !this._bleOta.committing) this._bleOta.cancel()
+  },
+
+  wifiOperationActive(operation) {
+    return this._wifiOperation === operation &&
+      this.connectionSessionActive(operation.deviceId, operation.session)
+  },
+
+  cancelWifi() {
+    const operation = this._wifiOperation
+    this._wifiOperation = null
+    if (operation?.timer != null) clearTimeout(operation.timer)
+    const waiter = operation?.waiter
+    if (waiter && this._ackWaiters?.[7] === waiter) {
+      clearTimeout(waiter.timer)
+      delete this._ackWaiters[7]
+      waiter.resolve({responded: false, ok: false})
+    }
+    this.setData({wifiBusy: false})
+  },
+
+  queryWifiState(attempt = 0) {
+    if (!this.data.connected || !this.data.notifyEnabled || this._wifiOperation || this._deviceInfoOperation || this._bleOta) return
+    const deviceId = this.data.currentDeviceId
+    const session = this._sessionGeneration || 0
+    if (!this.wifiChannelAvailable()) {
+      if (attempt < 20) this.scheduleConnectionTask(deviceId, session,
+        () => this.queryWifiState(attempt + 1), 500)
+      return
+    }
+    const operation = {deviceId, session, query: true, timer: null}
+    this._wifiOperation = operation
+    operation.timer = setTimeout(() => {
+      if (!this.wifiOperationActive(operation)) return
+      this.cancelWifi()
+      this.setData({wifiKnown: false, wifiStatus: '无法读取设置，请重连或升级设备固件'})
+    }, 4000)
+    this.writeWifiPacket(new Uint8Array([0x18]), operation)
+  },
+
+  writeWifiPacket(packet, operation) {
+    wx.writeBLECharacteristicValue({
+      writeType: 'write', deviceId: operation.deviceId,
+      serviceId: this.data.writeServiceId, characteristicId: this.data.writeCharacteristicId,
+      value: packet.buffer,
+      success: () => {},
+      fail: () => {
+        if (!this.wifiOperationActive(operation)) return
+        this.cancelWifi()
+        this.setData({wifiKnown: false, wifiStatus: '设置通信失败，请重新连接设备'})
+      }
+    })
+  },
+
+  onWifiToggle(e) {
+    if (!this.data.wifiKnown || !this.wifiChannelAvailable() || this._wifiOperation || this._deviceInfoOperation || this._bleOta) {
+      this.setData({wifiEnabled: this.data.wifiEnabled})
+      wx.showToast({title: '请等待当前操作完成', icon: 'none'})
+      return
+    }
+    const operation = {deviceId: this.data.currentDeviceId,
+      session: this._sessionGeneration || 0, enabled: !!e.detail.value, timer: null}
+    this._wifiOperation = operation
+    this.setData({wifiBusy: true, wifiStatus: '正在切换 Wi-Fi…'})
+    const ackPromise = this.waitForAck(7, 4000)
+    operation.waiter = this._ackWaiters[7]
+    this.writeWifiPacket(new Uint8Array([0x17, operation.enabled ? 1 : 0]), operation)
+    ackPromise.then(ack => {
+      if (!this.wifiOperationActive(operation)) return
+      if (!ack.ok) {
+        this.cancelWifi()
+        wx.showToast({title: ack.status === 2 ? '设备忙，请稍后重试' : 'Wi-Fi 设置未获确认', icon: 'none'})
+        this.queryWifiState()
+        return
+      }
+      operation.waiter = null
+      operation.polls = 0
+      this.pollWifiState(operation)
+    })
+  },
+
+  pollWifiState(operation) {
+    if (!this.wifiOperationActive(operation)) return
+    if (++operation.polls > 20) {
+      this.cancelWifi()
+      this.setData({wifiKnown: false, wifiStatus: '切换结果未确认，请重新连接设备'})
+      return
+    }
+    operation.timer = setTimeout(() => this.pollWifiState(operation), 500)
+    this.writeWifiPacket(new Uint8Array([0x18]), operation)
+  },
+
+  handleWifiState(buf) {
+    const operation = this._wifiOperation
+    if (!operation || !this.wifiOperationActive(operation)) return
+    const enabled = buf[1] === 1, running = buf[2] === 1, pending = buf[3] === 1
+    if ([...buf.slice(1)].some(value => value > 1)) return
+    this.setData({wifiKnown: true, wifiEnabled: enabled})
+    if (!operation.query && (pending || enabled !== operation.enabled ||
+        (!buf[4] && enabled !== running))) return
+    this.cancelWifi()
+    const failed = buf[4] === 1 || (!pending && enabled !== running)
+    this.setData({wifiStatus: pending ? 'Wi-Fi 正在切换，请稍后重试' :
+      failed ? '设置已保存，但切换失败，可重试或重启设备' :
+      running ? '已开启热点和联网功能' : '已关闭，可通过蓝牙重新开启'})
+    if (!operation.query && !failed) {
+      wx.showToast({title: running ? 'Wi-Fi 已开启' : 'Wi-Fi 已关闭', icon: 'success'})
+    }
+  },
+
   /**
    * 发送轮播配置 (CMD_SLIDESHOW_CTRL = 0x13)
    */
@@ -2497,7 +2775,7 @@ Page({
    */
   slideshowChannelAvailable() {
     return this.data.connected && !this._bluetoothDisposed && !this.data.sending &&
-      !this.data.loadingFiles && !this._deletePending && !this._selectOperation
+      !this.data.loadingFiles && !this._deletePending && !this._selectOperation && !this._wifiOperation && !this._deviceInfoOperation && !this._bleOta
   },
 
   slideshowOperationActive(operation) {

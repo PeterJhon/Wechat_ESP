@@ -124,6 +124,51 @@
       </scroll-view>
     </view>
 
+    <view wx:if="{{connected && notifyEnabled}}" class="card">
+      <view class="card-head">
+        <text class="card-title">Wi-Fi</text>
+        <switch class="card-switch" checked="{{wifiEnabled}}" bindchange="onWifiToggle"
+                disabled="{{!wifiKnown || wifiBusy || sending || loadingFiles}}" />
+      </view>
+      <text class="preset-hint">{{wifiStatus}}</text>
+      <text class="preset-hint">关闭后停止热点、联网和自动升级检查，蓝牙传图仍可用。设置断电保存。</text>
+    </view>
+
+    <view wx:if="{{connected && notifyEnabled}}" class="card">
+      <view class="card-head">
+        <text class="card-title firmware-title">固件更新</text>
+        <button class="firmware-check" bindtap="checkFirmwareUpdates" disabled="{{firmwareBusy || firmwareInstalling || firmwareCommitting}}">{{firmwareBusy ? '处理中…' : '检查更新'}}</button>
+      </view>
+      <view wx:if="{{firmwareCurrent}}" class="firmware-version-row">
+        <text class="firmware-label">设备版本</text>
+        <text class="firmware-value">{{firmwareCurrent}}</text>
+      </view>
+      <view wx:if="{{firmwareAvailable}}" class="firmware-version-row">
+        <text class="firmware-label">新版本</text>
+        <text class="firmware-value firmware-latest">{{firmwareLatest}}</text>
+      </view>
+      <view wx:if="{{firmwareAvailable}}" class="firmware-version-row">
+        <text class="firmware-label">固件大小</text>
+        <text class="firmware-value">{{firmwareSize}}</text>
+      </view>
+      <text class="firmware-status">{{firmwareStatus}}</text>
+      <view wx:if="{{firmwareBusy && firmwareAvailable}}" class="firmware-progress">
+        <view class="firmware-progress-head"><text>下载与校验</text><text>{{firmwareProgress}}%</text></view>
+        <progress percent="{{firmwareProgress}}" stroke-width="8" activeColor="#07c160" backgroundColor="#e8eaed" border-radius="8" />
+      </view>
+      <view wx:if="{{firmwareInstalling}}" class="firmware-progress">
+        <view class="firmware-progress-head"><text>{{firmwareCommitting ? '设备校验中' : '蓝牙传输'}}</text><text>{{firmwareInstallProgress}}%</text></view>
+        <progress percent="{{firmwareInstallProgress}}" stroke-width="8" activeColor="#07c160" backgroundColor="#e8eaed" border-radius="8" />
+      </view>
+      <view wx:if="{{(firmwareBusy && firmwareCurrent) || (firmwareDownloaded && firmwareBleSupported) || (firmwareInstalling && !firmwareCommitting)}}" class="firmware-actions">
+        <button wx:if="{{firmwareBusy && firmwareCurrent}}" class="firmware-btn firmware-secondary" bindtap="cancelFirmwareDownload">取消下载与检查</button>
+        <button wx:if="{{firmwareDownloaded && firmwareBleSupported}}" class="firmware-btn firmware-primary" bindtap="upgradeFirmware"
+                disabled="{{firmwareBusy || firmwareInstalling || firmwareCommitting || !firmwareConfirmed || sending || loadingFiles}}">{{firmwareCommitting ? '正在完成升级…' : (firmwareInstalling ? '正在蓝牙升级…' : '蓝牙升级固件')}}</button>
+        <button wx:if="{{firmwareInstalling && !firmwareCommitting}}" class="firmware-btn firmware-secondary" bindtap="cancelBleUpgrade">取消蓝牙升级</button>
+      </view>
+      <text wx:if="{{firmwareCurrent && !firmwareBleSupported}}" class="firmware-note">当前设备需先通过 HTTP 或 USB 安装支持蓝牙升级的新固件。</text>
+    </view>
+
     <!-- 轮播设置 -->
     <view wx:if="{{connected && notifyEnabled}}" class="card">
       <view class="card-head">

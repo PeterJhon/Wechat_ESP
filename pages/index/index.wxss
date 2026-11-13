@@ -441,6 +441,124 @@ button::after {
   color: #a2a8b0;
 }
 
+/* ============ 固件更新 ============ */
+
+.firmware-title {
+  font-size: 34rpx;
+  flex-shrink: 0;
+}
+
+.firmware-check {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 80rpx;
+  margin-left: 20rpx;
+  padding: 16rpx 28rpx;
+  box-sizing: border-box;
+  border-radius: 14rpx;
+  font-size: 28rpx;
+  line-height: 1.5;
+  color: #087d40;
+  background: #eef7ef;
+}
+
+.firmware-version-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12rpx 24rpx;
+  padding: 18rpx 24rpx;
+  background: #f7f8fa;
+  font-size: 28rpx;
+  line-height: 1.5;
+}
+
+.firmware-label {
+  flex-shrink: 0;
+  color: #646a73;
+}
+
+.firmware-value {
+  min-width: 0;
+  word-break: break-all;
+  font-size: 30rpx;
+  font-weight: 500;
+  color: #1f2329;
+}
+
+.firmware-latest {
+  color: #087d40;
+}
+
+.firmware-status {
+  display: block;
+  margin-top: 24rpx;
+  font-size: 28rpx;
+  line-height: 1.7;
+  color: #1f2329;
+}
+
+.firmware-progress {
+  margin-top: 24rpx;
+}
+
+.firmware-progress-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16rpx;
+  margin-bottom: 16rpx;
+  font-size: 28rpx;
+  line-height: 1.5;
+  color: #646a73;
+}
+
+.firmware-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 16rpx;
+  margin-top: 28rpx;
+}
+
+.firmware-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 96rpx;
+  padding: 20rpx 24rpx;
+  box-sizing: border-box;
+  border-radius: 16rpx;
+  font-size: 30rpx;
+  font-weight: 500;
+  line-height: 1.6;
+}
+
+.firmware-primary {
+  color: #fff;
+  background: #07c160;
+}
+
+.firmware-secondary {
+  color: #646a73;
+  background: #f0f2f5;
+}
+
+.firmware-btn[disabled],
+.firmware-check[disabled] {
+  color: #8f959e;
+  background: #eef0f3;
+}
+
+.firmware-note {
+  display: block;
+  margin-top: 24rpx;
+  font-size: 26rpx;
+  line-height: 1.7;
+  color: #646a73;
+}
+
 /* ============ 图片处理 ============ */
 
 .image-section,
